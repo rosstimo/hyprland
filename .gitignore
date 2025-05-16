@@ -1,0 +1,10 @@
+# ignore all files by default
+*  
+
+# ignore backup files
+*~ 
+
+# white list files with !<pattern>
+
+!.gitignore 
+# !*.conf 
