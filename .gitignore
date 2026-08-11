@@ -7,7 +7,7 @@
 # white list files with !<pattern>
 
 !.gitignore 
+!*.lua
 # !*.conf 
 !scripts/*
 !bindings/*
-
