@@ -8,6 +8,9 @@
 
 !.gitignore 
 !*.lua
+!TESTING.md
 # !*.conf 
+!scripts/
 !scripts/*
+!bindings/
 !bindings/*

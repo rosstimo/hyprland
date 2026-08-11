@@ -1,0 +1,50 @@
+#!/bin/bash
+
+# Small, distro-neutral session power menu.
+
+choose() {
+  local prompt=$1
+
+  if command -v walker >/dev/null 2>&1; then
+    walker --dmenu -p "$prompt" --width 320 --minheight 1 --maxheight 320
+  elif command -v wofi >/dev/null 2>&1; then
+    wofi --dmenu -p "$prompt"
+  elif command -v rofi >/dev/null 2>&1; then
+    rofi -dmenu -p "$prompt"
+  else
+    command -v notify-send >/dev/null 2>&1 && notify-send "Power menu" "Install walker, wofi, or rofi"
+    return 1
+  fi
+}
+
+confirm() {
+  local action=$1
+  [[ $(printf 'No\nYes\n' | choose "$action?") == "Yes" ]]
+}
+
+choice=$(printf 'Lock\nSuspend\nLog out\nReboot\nPower off\n' | choose "Power") || exit 0
+
+case "$choice" in
+  Lock)
+    pidof hyprlock >/dev/null || hyprlock
+    ;;
+  Suspend)
+    loginctl lock-session
+    systemctl suspend
+    ;;
+  "Log out")
+    if command -v uwsm >/dev/null 2>&1; then
+      uwsm stop
+    elif command -v hyprshutdown >/dev/null 2>&1; then
+      hyprshutdown
+    else
+      hyprctl dispatch 'hl.dsp.exit()'
+    fi
+    ;;
+  Reboot)
+    confirm "Reboot" && systemctl reboot
+    ;;
+  "Power off")
+    confirm "Power off" && systemctl poweroff
+    ;;
+esac

@@ -1,0 +1,62 @@
+#!/bin/bash
+
+# Capture a region, the active window, or the focused output with grim.
+
+mode=${1:-region}
+
+for program in grim jq; do
+  if ! command -v "$program" >/dev/null 2>&1; then
+    command -v notify-send >/dev/null 2>&1 && notify-send "Screenshot" "Missing dependency: $program"
+    exit 1
+  fi
+done
+
+[[ -f $HOME/.config/user-dirs.dirs ]] && source "$HOME/.config/user-dirs.dirs"
+output_dir="${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots"
+mkdir -p "$output_dir"
+
+# Account for scaling and portrait or transformed displays.
+monitor_geometry='def format_geo:
+  .x as $x | .y as $y |
+  (.width / .scale | floor) as $w |
+  (.height / .scale | floor) as $h |
+  .transform as $t |
+  if $t == 1 or $t == 3 then
+    "\($x),\($y) \($h)x\($w)"
+  else
+    "\($x),\($y) \($w)x\($h)"
+  end;'
+
+case "$mode" in
+  region)
+    if ! command -v slurp >/dev/null 2>&1; then
+      command -v notify-send >/dev/null 2>&1 && notify-send "Screenshot" "Missing dependency: slurp"
+      exit 1
+    fi
+    selection=$(slurp 2>/dev/null) || exit 0
+    ;;
+  window)
+    selection=$(hyprctl activewindow -j | jq -r '"\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1])"')
+    ;;
+  output)
+    selection=$(hyprctl monitors -j | jq -r "$monitor_geometry .[] | select(.focused == true) | format_geo")
+    ;;
+  *)
+    printf 'Usage: %s [region|window|output]\n' "${0##*/}" >&2
+    exit 2
+    ;;
+esac
+
+[[ -n $selection ]] || exit 0
+filepath="$output_dir/screenshot-$(date +'%Y-%m-%d_%H-%M-%S').png"
+grim -g "$selection" "$filepath" || exit 1
+
+if command -v wl-copy >/dev/null 2>&1; then
+  wl-copy <"$filepath"
+  message="Saved to file and clipboard"
+else
+  message="Saved to file"
+fi
+
+printf '%s\n' "$filepath"
+command -v notify-send >/dev/null 2>&1 && notify-send "Screenshot" "$message" -i "$filepath"

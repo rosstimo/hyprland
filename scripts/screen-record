@@ -1,0 +1,90 @@
+#!/bin/bash
+
+# Start or stop a wf-recorder capture. Calling the script while a recording is
+# active stops it cleanly so the video container is finalized.
+
+mode=${1:-region}
+with_audio=${2:-}
+runtime_dir=${XDG_RUNTIME_DIR:-/tmp}
+pid_file="$runtime_dir/hypr-screen-record.pid"
+path_file="$runtime_dir/hypr-screen-record.path"
+
+notify() {
+  command -v notify-send >/dev/null 2>&1 && notify-send "$@"
+}
+
+if [[ -f $pid_file ]]; then
+  recorder_pid=$(<"$pid_file")
+  if [[ $recorder_pid =~ ^[0-9]+$ ]] && kill -0 "$recorder_pid" 2>/dev/null; then
+    kill -INT "$recorder_pid"
+    for _ in {1..50}; do
+      kill -0 "$recorder_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    filepath=$(<"$path_file" 2>/dev/null)
+    rm -f "$pid_file" "$path_file"
+    notify "Screen recording saved" "$filepath"
+    printf '%s\n' "$filepath"
+    exit 0
+  fi
+
+  rm -f "$pid_file" "$path_file"
+fi
+
+for program in wf-recorder jq; do
+  if ! command -v "$program" >/dev/null 2>&1; then
+    notify "Screen recording" "Missing dependency: $program"
+    exit 1
+  fi
+done
+
+[[ -f $HOME/.config/user-dirs.dirs ]] && source "$HOME/.config/user-dirs.dirs"
+output_dir="${XDG_VIDEOS_DIR:-$HOME/Videos}/Recordings"
+mkdir -p "$output_dir"
+
+monitor_geometry='def format_geo:
+  .x as $x | .y as $y |
+  (.width / .scale | floor) as $w |
+  (.height / .scale | floor) as $h |
+  .transform as $t |
+  if $t == 1 or $t == 3 then
+    "\($x),\($y) \($h)x\($w)"
+  else
+    "\($x),\($y) \($w)x\($h)"
+  end;'
+
+case "$mode" in
+  region)
+    if ! command -v slurp >/dev/null 2>&1; then
+      notify "Screen recording" "Missing dependency: slurp"
+      exit 1
+    fi
+    geometry=$(slurp 2>/dev/null) || exit 0
+    ;;
+  output)
+    geometry=$(hyprctl monitors -j | jq -r "$monitor_geometry .[] | select(.focused == true) | format_geo")
+    ;;
+  *)
+    printf 'Usage: %s [region|output] [audio]\n' "${0##*/}" >&2
+    exit 2
+    ;;
+esac
+
+[[ -n $geometry ]] || exit 0
+filepath="$output_dir/screen-recording-$(date +'%Y-%m-%d_%H-%M-%S').mp4"
+command=(wf-recorder -g "$geometry" -f "$filepath")
+[[ $with_audio == "audio" ]] && command+=(--audio)
+
+setsid "${command[@]}" >/dev/null 2>&1 &
+recorder_pid=$!
+printf '%s\n' "$recorder_pid" >"$pid_file"
+printf '%s\n' "$filepath" >"$path_file"
+sleep 0.2
+
+if ! kill -0 "$recorder_pid" 2>/dev/null; then
+  rm -f "$pid_file" "$path_file"
+  notify "Screen recording" "wf-recorder failed to start"
+  exit 1
+fi
+
+notify "Screen recording started" "Run the same shortcut again to stop"

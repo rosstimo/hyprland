@@ -1,49 +1,56 @@
 #!/bin/bash
 
 # A script to display Hyprland keybindings defined in your configuration
-# using walker for an interactive search menu.
+# using Walker for an interactive search menu.
+
+set -o pipefail
+
+for program in hyprctl jq walker; do
+  if ! command -v "$program" >/dev/null 2>&1; then
+    command -v notify-send >/dev/null 2>&1 && notify-send "Keybindings menu" "Missing dependency: $program"
+    exit 1
+  fi
+done
 
 # Fetch dynamic keybindings from Hyprland
 #
 # Also do some pre-processing:
-# - Remove standard Omarchy bin path prefix
-# - Remove uwsm prefix
-# - Map numeric modifier key mask to a textual rendition
+# - Remove an optional uwsm prefix
+# - Map numeric modifier key masks to a textual rendition
 # - Output comma-separated values that the parser can understand
 dynamic_bindings() {
   hyprctl -j binds | \
     jq -r '.[] | {modmask, key, keycode, description, dispatcher, arg} | "\(.modmask),\(.key)@\(.keycode),\(.description),\(.dispatcher),\(.arg)"' | \
     sed -r \
-        -e 's/null//' \
-        -e 's,~/.local/share/omarchy/bin/,,' \
-        -e 's,uwsm app -- ,,' \
-        -e 's/@0//' \
-        -e 's/,@/,code:/' \
-        -e 's/^0,/,/' \
-        -e 's/^1,/SHIFT,/' \
-        -e 's/^4,/CTRL,/' \
-        -e 's/^5,/SHIFT CTRL,/' \
-        -e 's/^8,/ALT,/' \
-        -e 's/^9,/SHIFT ALT,/' \
-        -e 's/^12,/CTRL ALT,/' \
-        -e 's/^13,/SHIFT CTRL ALT,/' \
-        -e 's/^64,/SUPER,/' \
-        -e 's/^65,/SUPER SHIFT,/' \
-        -e 's/^68,/SUPER CTRL,/' \
-        -e 's/^69,/SUPER SHIFT CTRL,/' \
-        -e 's/^72,/SUPER ALT,/' \
-        -e 's/^73,/SUPER SHIFT ALT,/' \
-        -e 's/^76,/SUPER CTRL ALT,/' \
-        -e 's/^77,/SUPER SHIFT CTRL ALT,/'
+      -e 's/null//' \
+      -e 's,uwsm app -- ,,' \
+      -e 's/@0//' \
+      -e 's/,@/,code:/' \
+      -e 's/^0,/,/' \
+      -e 's/^1,/SHIFT,/' \
+      -e 's/^4,/CTRL,/' \
+      -e 's/^5,/SHIFT CTRL,/' \
+      -e 's/^8,/ALT,/' \
+      -e 's/^9,/SHIFT ALT,/' \
+      -e 's/^12,/CTRL ALT,/' \
+      -e 's/^13,/SHIFT CTRL ALT,/' \
+      -e 's/^64,/SUPER,/' \
+      -e 's/^65,/SUPER SHIFT,/' \
+      -e 's/^68,/SUPER CTRL,/' \
+      -e 's/^69,/SUPER SHIFT CTRL,/' \
+      -e 's/^72,/SUPER ALT,/' \
+      -e 's/^73,/SUPER SHIFT ALT,/' \
+      -e 's/^76,/SUPER CTRL ALT,/' \
+      -e 's/^77,/SUPER SHIFT CTRL ALT,/'
 }
 
 # Parse and format keybindings
 #
 # `awk` does the heavy lifting:
 # - Set the field separator to a comma ','.
-# - Joins the key combination (e.g., "SUPER + Q").
-# - Joins the command that the key executes.
-# - Prints everything in a nicely aligned format.
+# - Join the key combination, for example "SUPER + Q".
+# - Join the command that the key executes.
+# - Print everything in a nicely aligned format.
 parse_bindings() {
   awk -F, '
 {
@@ -67,7 +74,7 @@ parse_bindings() {
         sub(/,$/, "", action);
         gsub(/(^|,)[[:space:]]*exec[[:space:]]*,?/, "", action);
         gsub(/^[ \t]+|[ \t]+$/, "", action);
-        gsub(/[ \t]+/, " ", key_combo);  # Collapse multiple spaces to one
+        gsub(/[ \t]+/, " ", key_combo);
 
         # Escape XML entities
         gsub(/&/, "\\&amp;", action);
@@ -76,7 +83,6 @@ parse_bindings() {
         gsub(/"/, "\\&quot;", action);
         gsub(/'"'"'/, "\\&apos;", action);
     }
-
 
     if (action != "") {
         printf "%-45s → %s\n", action, key_combo;
@@ -91,5 +97,4 @@ dynamic_bindings | \
   sort -u | \
   parse_bindings | \
   sort | \
-  walker --dmenu --theme keybindings -p 'Keybindings' -w 800 -h "$menu_height"
-
+  walker --dmenu -p 'Keybindings' --width 800 --height "$menu_height"

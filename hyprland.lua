@@ -1,14 +1,13 @@
--- Hyprland Lua migration entrypoint.
+-- Hyprland Lua configuration entrypoint.
+-- See https://wiki.hypr.land/Configuring/Start/
 --
--- This branch is still under construction. Do not use it as the active
--- Hyprland configuration until the remaining modules below have been ported.
+-- The legacy .conf files remain in this branch for the first testing pass and
+-- rollback only. They are not sourced by this Lua configuration.
 
 require("envs")
 require("autostart")
 require("monitors")
 require("input")
 require("looknfeel")
-
--- Migration phases still to come:
--- require("windows")
--- require("bindings")
+require("windows")
+require("bindings")

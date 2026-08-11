@@ -26,9 +26,13 @@ hl.on("hyprland.start", function()
     '[ -e "$HOME/.config/hypr/wallpaper" ] && swaybg -i "$HOME/.config/hypr/wallpaper" -m fill'
   )
 
-  -- Common locations used by Arch, Fedora, and Debian-family packages.
+  -- Prefer Hyprland's native agent, then try common locations used by Arch,
+  -- Fedora, and Debian-family packages.
   hl.exec_cmd(
-    "for agent in "
+    "if command -v hyprpolkitagent >/dev/null 2>&1; then "
+      .. "exec hyprpolkitagent; "
+      .. "fi; "
+      .. "for agent in "
       .. "/usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1 "
       .. "/usr/libexec/polkit-gnome-authentication-agent-1; do "
       .. '[ -x "$agent" ] && exec "$agent"; '
