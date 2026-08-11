@@ -5,10 +5,10 @@
 
 require("envs")
 require("autostart")
+require("monitors")
+require("input")
 
 -- Migration phases still to come:
--- require("monitors")
--- require("input")
 -- require("looknfeel")
 -- require("windows")
 -- require("bindings")
