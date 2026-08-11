@@ -7,8 +7,8 @@ require("envs")
 require("autostart")
 require("monitors")
 require("input")
+require("looknfeel")
 
 -- Migration phases still to come:
--- require("looknfeel")
 -- require("windows")
 -- require("bindings")

@@ -1,3 +1,6 @@
+-- Extra autostart processes
+-- Add hl.exec_cmd("uwsm app -- my-service") inside the hyprland.start event.
+
 -- Generic session services inherited from the legacy configuration.
 -- Omarchy-specific first-run, update, power-profile, monitor-watch, and hook
 -- commands are intentionally omitted.

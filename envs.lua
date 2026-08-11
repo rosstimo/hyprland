@@ -1,3 +1,6 @@
+-- Extra env variables
+-- hl.env("MY_GLOBAL_ENV", "setting")
+
 -- Environment inherited from the legacy Omarchy configuration, without its
 -- theme and update machinery.
 
