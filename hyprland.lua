@@ -6,7 +6,7 @@
 
 require("envs")
 require("autostart")
-require("monitors")
+require("displays")
 require("input")
 require("looknfeel")
 require("windows")
