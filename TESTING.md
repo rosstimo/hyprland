@@ -8,10 +8,10 @@ This branch is ready for live Hyprland testing. The Lua entrypoint is
 | Area | Decision |
 | --- | --- |
 | Hyprland entrypoint, input, appearance, rules, and binds | Ported to Lua |
-| Display layout | Owned by `nwg-displays`; its generated `monitors.lua` is loaded through `displays.lua` and ignored by Git |
+| Display layout | Owned by `nwg-displays`; its generated `monitors.conf` and `monitors.lua` are ignored by Git, and `monitors.lua` is loaded through `displays.lua` |
 | Wallpaper | Decoupled from Omarchy; `~/.config/hypr/wallpaper` is preferred, with the old Omarchy background link used only as a migration fallback |
 | `hypridle.conf`, `hyprlock.conf`, and `hyprsunset.conf` | Kept in their native config formats and removed Omarchy dependencies |
-| Legacy Hyprland and binding `.conf` files | Kept temporarily for the first rollback |
+| Legacy Hyprland and binding `.conf` files | Kept temporarily for rollback, except the generated `monitors.conf` |
 | `bindings.conf~` | Deleted as an obsolete backup |
 | Keybinding menu | Renamed and made independent of Omarchy |
 | Terminal CWD, idle, nightlight, power, screenshot, recording, and wallpaper commands | Replaced with local scripts |
@@ -64,19 +64,20 @@ hyprctl clients
 ## Display test with nwg-displays
 
 Open `nwg-displays`, verify the layout, resolution, refresh rate, and scale, then
-click Apply. It should regenerate both its legacy `monitors.conf` and the Lua
-file used by this branch.
+click Apply. It should regenerate both `monitors.conf` and the Lua file used by
+this branch.
 
-Check the generated Lua file and make sure Git ignores it:
+Check the generated Lua file and make sure Git ignores both generated files:
 
 ```sh
 sed -n '1,200p' ~/.config/hypr/monitors.lua
 git status --short
 ```
 
-`monitors.lua` should not appear in `git status`. Change one harmless display
-setting in `nwg-displays`, apply it, then change it back and apply again. The
-layout should update immediately both times without editing the repository.
+Neither `monitors.conf` nor `monitors.lua` should appear in `git status`. Change
+one harmless display setting in `nwg-displays`, apply it, then change it back
+and apply again. The layout should update immediately both times without
+editing the repository.
 
 ## Wallpaper test
 
