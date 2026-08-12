@@ -19,10 +19,10 @@ hl.on("hyprland.start", function()
   start_if_available("waybar")
   start_if_available("fcitx5", "fcitx5 --disable notificationitem")
 
-  -- Use our own wallpaper link when present. During migration, the helper can
-  -- still read Omarchy's current background link so the existing wallpaper is
-  -- preserved without making Omarchy part of the permanent configuration.
-  hl.exec_cmd('bash "$HOME/.config/hypr/scripts/wallpaper"')
+  -- Waypaper remembers the selected backend, monitor assignments, and
+  -- wallpapers. With the awww backend it also starts awww-daemon as needed.
+  -- See https://github.com/anufrievroman/waypaper
+  start_if_available("waypaper", "waypaper --restore")
 
   -- Prefer Hyprland's native agent, then try common locations used by Arch,
   -- Fedora, and Debian-family packages.
