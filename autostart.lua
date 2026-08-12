@@ -19,12 +19,10 @@ hl.on("hyprland.start", function()
   start_if_available("waybar")
   start_if_available("fcitx5", "fcitx5 --disable notificationitem")
 
-  -- A wallpaper symlink or file can be added later without changing this
-  -- module. Until it exists, swaybg is not started.
-  start_if_available(
-    "swaybg",
-    '[ -e "$HOME/.config/hypr/wallpaper" ] && swaybg -i "$HOME/.config/hypr/wallpaper" -m fill'
-  )
+  -- Use our own wallpaper link when present. During migration, the helper can
+  -- still read Omarchy's current background link so the existing wallpaper is
+  -- preserved without making Omarchy part of the permanent configuration.
+  hl.exec_cmd('bash "$HOME/.config/hypr/scripts/wallpaper"')
 
   -- Prefer Hyprland's native agent, then try common locations used by Arch,
   -- Fedora, and Debian-family packages.
