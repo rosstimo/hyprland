@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+
+set -u
+
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
+wallpaper_link="$config_dir/wallpaper"
+legacy_wallpaper="$HOME/.local/state/omarchy/current/background"
+
+if [[ $# -gt 0 ]]; then
+  if [[ ! -f "$1" ]]; then
+    printf 'Wallpaper does not exist: %s\n' "$1" >&2
+    exit 1
+  fi
+
+  mkdir -p "$config_dir"
+  ln -sfn "$(realpath -- "$1")" "$wallpaper_link"
+fi
+
+wallpaper=""
+
+if [[ -f "$wallpaper_link" ]]; then
+  wallpaper="$(realpath -- "$wallpaper_link")"
+elif [[ -f "$legacy_wallpaper" ]]; then
+  # Migration fallback only. Once ~/.config/hypr/wallpaper exists, Omarchy is
+  # no longer involved in wallpaper selection.
+  wallpaper="$(realpath -- "$legacy_wallpaper")"
+fi
+
+if [[ -z "$wallpaper" || ! -f "$wallpaper" ]]; then
+  exit 0
+fi
+
+if command -v swaybg >/dev/null 2>&1; then
+  pkill -x swaybg >/dev/null 2>&1 || true
+  exec swaybg -i "$wallpaper" -m fill
+fi
+
+if command -v hyprpaper >/dev/null 2>&1 && command -v hyprctl >/dev/null 2>&1; then
+  if ! pgrep -x hyprpaper >/dev/null 2>&1; then
+    hyprpaper >/dev/null 2>&1 &
+  fi
+
+  for _ in {1..20}; do
+    if hyprctl hyprpaper wallpaper ", $wallpaper, cover" >/dev/null 2>&1; then
+      exit 0
+    fi
+    sleep 0.1
+  done
+
+  printf 'hyprpaper started but the wallpaper IPC request failed\n' >&2
+  exit 1
+fi
+
+printf 'No wallpaper backend found. Install swaybg or hyprpaper.\n' >&2
+exit 1
