@@ -22,7 +22,217 @@ __WRB_PART_2__
 # __WRB_ASSEMBLY_GUARD_2_4__
 # __WRB_ASSEMBLY_GUARD_2_5__
 # __WRB_ASSEMBLY_GUARD_2_6__
-__WRB_PART_3__
+def matcher_default(field: str, client: dict[str, Any], active_addr: str) -> str:
+    if field == "class":
+        return exact_regex(str(client.get("class") or ""))
+    if field == "title":
+        return exact_regex(str(client.get("title") or ""))
+    if field == "initial_class":
+        return exact_regex(str(client.get("initialClass") or ""))
+    if field == "initial_title":
+        return exact_regex(str(client.get("initialTitle") or ""))
+    if field == "xdg_tag":
+        return exact_regex(str(client.get("xdgTag") or ""))
+    if field == "tag":
+        tags = client_tags(client)
+        return _normalize_tag(tags[0]) if tags else ""
+    if field == "xwayland":
+        return bool_lua(bool(client.get("xwayland")))
+    if field == "float":
+        return bool_lua(bool(client.get("floating")))
+    if field == "fullscreen":
+        return bool_lua(bool(int(client.get("fullscreen") or 0)))
+    if field == "pin":
+        return bool_lua(bool(client.get("pinned")))
+    if field == "focus":
+        return bool_lua(str(client.get("address")) == active_addr)
+    if field == "group":
+        return bool_lua(bool(client.get("grouped") or []))
+    if field == "modal":
+        return bool_lua(bool(client.get("modal")))
+    if field == "workspace":
+        ws_id, ws_name = client_workspace(client)
+        return str(ws_id if ws_id != "" else f"name:{ws_name}")
+    if field == "content":
+        return str(client.get("content") or client.get("contentType") or "")
+    return ""
+
+
+def matcher_entries(client: dict[str, Any], active_addr: str) -> list[tuple[str, str]]:
+    entries = []
+    for field in MATCH_FIELDS:
+        default = matcher_default(field, client, active_addr)
+        if field in {"class", "title", "initial_class", "initial_title", "xdg_tag"}:
+            raw_field = {
+                "class": "class",
+                "title": "title",
+                "initial_class": "initialClass",
+                "initial_title": "initialTitle",
+                "xdg_tag": "xdgTag",
+            }[field]
+            raw = str(client.get(raw_field) or "")
+            display_default = truncate(raw, 60) or "(empty)"
+        else:
+            display_default = default or "(not available)"
+        entries.append((field, f"{field:<15} current: {display_default}"))
+    return entries
+
+
+def _edit_matchers(
+    fields: list[str],
+    client: dict[str, Any],
+    active_addr: str,
+) -> dict[str, str]:
+    out: dict[str, str] = {}
+    print()
+    print("Matcher values")
+    print("Press Enter to keep each suggested value.")
+    for field in fields:
+        default = matcher_default(field, client, active_addr)
+        if field in BOOL_MATCH_FIELDS:
+            value = prompt_value(field, default or "false").lower()
+            if value not in {"true", "false"}:
+                print(f"  Invalid boolean for {field}; using {default or 'false'}.")
+                value = default or "false"
+        else:
+            value = prompt_value(field, default)
+        if value:
+            out[field] = value
+    return out
+
+
+def build_match(client: dict[str, Any], active_addr: str) -> dict[str, str]:
+    cls = str(client.get("class") or "")
+    title = str(client.get("title") or "")
+    initial_cls = str(client.get("initialClass") or "")
+    initial_title = str(client.get("initialTitle") or "")
+
+    profiles: list[tuple[str, str]] = []
+    if cls:
+        profiles.append((
+            "app",
+            f"All {truncate(cls, 36)} windows  |  match class only",
+        ))
+    if initial_cls and initial_title:
+        profiles.append((
+            "initial",
+            f"Launch identity  |  initial class + initial title: {truncate(initial_title, 38)}",
+        ))
+    if cls and title:
+        changed = "  (title changed since launch)" if title != initial_title else ""
+        profiles.append((
+            "window",
+            f"Current identity  |  class + current title: {truncate(title, 42)}{changed}",
+        ))
+    profiles.append(("custom", "Custom match fields  |  advanced"))
+
+    print()
+    print("How should this rule identify the window?")
+    selected = fzf_select(
+        profiles,
+        "Identify>",
+        header="Launch identity is safer for startup behavior. Current title is more precise but may change after creation.",
+    )[0]
+
+    if selected == "app":
+        fields = ["class"]
+    elif selected == "window":
+        fields = ["class", "title"]
+    elif selected == "initial":
+        fields = ["initial_class", "initial_title"]
+    else:
+        print()
+        print("Select match fields. Space toggles items; Enter accepts.")
+        fields = fzf_select(
+            matcher_entries(client, active_addr),
+            "Match>",
+            multi=True,
+            header="Select one or more fields. Enter with nothing selected is not allowed.",
+        )
+        if not fields:
+            print("A rule needs at least one match field.")
+            raise UserCancelled
+
+    out = {field: matcher_default(field, client, active_addr) for field in fields}
+    out = {field: value for field, value in out.items() if value != ""}
+
+    print()
+    print("Match preview")
+    print("=" * min(80, terminal_width()))
+    for field, value in out.items():
+        print(f"{field:<15} {value}")
+    if prompt_yes_no("Edit these matcher values?", False):
+        out = _edit_matchers(fields, client, active_addr)
+
+    if not out:
+        print("No usable matcher values were produced.")
+        raise UserCancelled
+    return out
+
+
+def mon_local_position(client: dict[str, Any], monitors: list[dict[str, Any]]) -> tuple[int, int] | None:
+    at = client.get("at")
+    if not isinstance(at, list) or len(at) < 2:
+        return None
+    mon = monitor_for_client(client, monitors)
+    try:
+        x = int(at[0])
+        y = int(at[1])
+        if mon:
+            x -= int(mon.get("x") or 0)
+            y -= int(mon.get("y") or 0)
+        return x, y
+    except (TypeError, ValueError):
+        return None
+
+
+def client_fullscreen_flags(client: dict[str, Any]) -> tuple[bool, bool]:
+    """Return (fullscreen, maximized) from Hyprland's internal fullscreen state."""
+    try:
+        state = int(client.get("fullscreen") or 0)
+    except (TypeError, ValueError):
+        state = 0
+    return state in {2, 3}, state in {1, 3}
+
+
+def live_boolean_state(key: str, client: dict[str, Any]) -> bool | None:
+    fullscreen, maximized = client_fullscreen_flags(client)
+    mapping: dict[str, bool | None] = {
+        "fullscreen": fullscreen,
+        "maximize": maximized,
+        "pin": bool(client.get("pinned")),
+        "pseudo": bool(client.get("pseudo")) if "pseudo" in client else None,
+        "focus_on_activate": None,
+        "persistent_size": None,
+        "keep_aspect_ratio": None,
+        "opaque": None,
+        "no_screen_share": None,
+        "no_initial_focus": None,
+        "no_follow_mouse": None,
+        "no_focus": None,
+        "no_anim": None,
+        "no_blur": None,
+        "no_dim": None,
+        "no_shadow": None,
+        "no_shortcuts_inhibit": None,
+    }
+    return mapping.get(key)
+
+
+BOOLEAN_EFFECTS: list[tuple[str, str, str]] = [
+    ("fullscreen", "Fullscreen", "open fullscreen"),
+    ("maximize", "Maximize", "open maximized"),
+    ("pin", "Pin", "show on all workspaces; floating only"),
+    ("pseudo", "Pseudo tile", "use pseudotiling"),
+    ("persistent_size", "Remember floating size", "allow size persistence"),
+    ("keep_aspect_ratio", "Keep aspect ratio", "preserve aspect ratio while resizing"),
+    ("opaque", "Force opaque", "disable transparency"),
+    ("no_screen_share", "Hide from screen sharing", "block capture of this window"),
+    ("no_initial_focus", "No initial focus", "do not focus when opened"),
+    ("focus_on_activate", "Focus on activate", "allow app activation to focus the window"),
+    ("no_follow_mouse", "No follow mouse", "ignore follow-mouse focus"),
+    ("no_focus", "Never focus", "prevent focus"),
+    ("no_anim", "No animation", "disable window animations"),
 # __WRB_ASSEMBLY_GUARD_3_0__
 # __WRB_ASSEMBLY_GUARD_3_1__
 # __WRB_ASSEMBLY_GUARD_3_2__
