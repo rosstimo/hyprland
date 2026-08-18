@@ -6,7 +6,265 @@ __WRB_PART_0__
 # __WRB_ASSEMBLY_GUARD_0_4__
 # __WRB_ASSEMBLY_GUARD_0_5__
 # __WRB_ASSEMBLY_GUARD_0_6__
-__WRB_PART_1__
+        if mon.get("id") == cid:
+            return mon
+    for mon in monitors:
+        if mon.get("name") == cid:
+            return mon
+    return None
+
+
+def window_display(client: dict[str, Any], active_addr: str) -> str:
+    ws_id, ws_name = client_workspace(client)
+    mark = "*" if client.get("address") == active_addr else " "
+    mode = "F" if client.get("floating") else "T"
+    try:
+        fs_state = int(client.get("fullscreen") or 0)
+    except (TypeError, ValueError):
+        fs_state = 0
+    if fs_state in {1, 3}:
+        mode += "M"
+    if fs_state in {2, 3}:
+        mode += "S"
+    if client.get("pinned"):
+        mode += "P"
+    cls = truncate(client.get("class") or "<no class>", 32)
+    title = truncate(client.get("title") or "<no title>", 60)
+    ws = ws_name or ws_id
+    return f"{mark} ws:{ws!s:<6} {mode:<3} {cls:<32}  {title}"
+
+
+def choose_client(clients: list[dict[str, Any]], active: dict[str, Any]) -> dict[str, Any] | None:
+    active_addr = str(active.get("address") or "")
+    ordered = sorted(
+        clients,
+        key=lambda c: (
+            0 if str(c.get("address") or "") == active_addr else 1,
+            (c.get("workspace") or {}).get("id", 999999),
+            str(c.get("class") or "").lower(),
+            str(c.get("title") or "").lower(),
+        ),
+    )
+    entries = [(str(c.get("address")), window_display(c, active_addr)) for c in ordered]
+    keys = fzf_select(
+        entries,
+        "Window>",
+        header="* active   F floating   T tiled   M maximized   S fullscreen   P pinned",
+    )
+    if not keys:
+        return None
+    key = keys[0]
+    return next((c for c in ordered if str(c.get("address")) == key), None)
+
+
+def print_client(client: dict[str, Any], monitors: list[dict[str, Any]], active_addr: str) -> None:
+    ws_id, ws_name = client_workspace(client)
+    mon = monitor_for_client(client, monitors)
+    at = client.get("at") or ["?", "?"]
+    size = client.get("size") or ["?", "?"]
+    tags = ", ".join(client_tags(client)) or "(none)"
+    print("Selected window")
+    print("=" * min(80, terminal_width()))
+    print(f"Address       : {client.get('address', '')}")
+    print(f"Class         : {client.get('class', '')}")
+    print(f"Initial class : {client.get('initialClass', '')}")
+    print(f"Title         : {client.get('title', '')}")
+    print(f"Initial title : {client.get('initialTitle', '')}")
+    print(f"Workspace     : {ws_name or ws_id} (id {ws_id})")
+    print(f"Monitor       : {(mon or {}).get('name', client.get('monitor', ''))}")
+    print(f"Position      : {at}")
+    print(f"Size          : {size}")
+    print(f"Floating      : {bool(client.get('floating'))}")
+    print(f"Fullscreen    : {client.get('fullscreen', 0)}")
+    print(f"Pinned        : {bool(client.get('pinned'))}")
+    print(f"XWayland      : {bool(client.get('xwayland'))}")
+    if "modal" in client:
+        print(f"Modal         : {bool(client.get('modal'))}")
+    print(f"Focused       : {str(client.get('address')) == active_addr}")
+    print(f"Tags          : {tags}")
+    if client.get("xdgTag"):
+        print(f"XDG tag       : {client.get('xdgTag')}")
+
+
+# ---------- Minimal Lua static parser ----------
+
+def _scan_balanced(text: str, start: int, open_char: str, close_char: str) -> int | None:
+    if start >= len(text) or text[start] != open_char:
+        return None
+    depth = 0
+    i = start
+    quote: str | None = None
+    long_string = False
+    while i < len(text):
+        ch = text[i]
+
+        if long_string:
+            if text.startswith("]]", i):
+                long_string = False
+                i += 2
+                continue
+            i += 1
+            continue
+
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+
+        if text.startswith("--[[", i):
+            end = text.find("]]", i + 4)
+            if end < 0:
+                return len(text)
+            i = end + 2
+            continue
+        if text.startswith("--", i):
+            end = text.find("\n", i + 2)
+            if end < 0:
+                return len(text)
+            i = end + 1
+            continue
+        if text.startswith("[[", i):
+            long_string = True
+            i += 2
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            i += 1
+            continue
+        if ch == open_char:
+            depth += 1
+        elif ch == close_char:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def _split_top_level(text: str, delimiter: str = ",") -> list[str]:
+    parts: list[str] = []
+    start = 0
+    stack: list[str] = []
+    quote: str | None = None
+    i = 0
+    pairs = {")": "(", "}": "{", "]": "["}
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            i += 1
+            continue
+        if ch in "({[":
+            stack.append(ch)
+        elif ch in ")}]":
+            if stack and stack[-1] == pairs[ch]:
+                stack.pop()
+        elif ch == delimiter and not stack:
+            parts.append(text[start:i].strip())
+            start = i + 1
+        i += 1
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _find_top_level_equals(text: str) -> int:
+    stack: list[str] = []
+    quote: str | None = None
+    i = 0
+    pairs = {")": "(", "}": "{", "]": "["}
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+        elif ch in "({[":
+            stack.append(ch)
+        elif ch in ")}]":
+            if stack and stack[-1] == pairs[ch]:
+                stack.pop()
+        elif ch == "=" and not stack:
+            return i
+        i += 1
+    return -1
+
+
+def _unquote_lua(value: str) -> str | None:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        body = value[1:-1]
+        body = body.replace(r"\\", "\\")
+        if value[0] == '"':
+            body = body.replace(r"\"", '"')
+        else:
+            body = body.replace(r"\'", "'")
+        return body
+    return None
+
+
+def _parse_lua_value(value: str) -> Any:
+    value = value.strip()
+    quoted = _unquote_lua(value)
+    if quoted is not None:
+        return quoted
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    if value == "nil":
+        return None
+    if re.fullmatch(r"-?\d+", value):
+        return int(value)
+    if re.fullmatch(r"-?(?:\d+\.\d*|\d*\.\d+)", value):
+        return float(value)
+    if value.startswith("{") and value.endswith("}"):
+        return _parse_lua_table(value)
+    return {"__lua__": value}
+
+
+def _parse_lua_table(table: str) -> dict[str, Any] | list[Any]:
+    table = table.strip()
+    if not (table.startswith("{") and table.endswith("}")):
+        return {"__lua__": table}
+    inner = table[1:-1]
+    fields = _split_top_level(inner)
+    keyed: dict[str, Any] = {}
+    positional: list[Any] = []
+    for field in fields:
+        eq = _find_top_level_equals(field)
+        if eq >= 0:
+            key = field[:eq].strip()
+            val = field[eq + 1 :].strip()
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                keyed[key] = _parse_lua_value(val)
+            else:
+                keyed[key] = {"__lua__": val}
+        elif field:
+            positional.append(_parse_lua_value(field))
+    if keyed and positional:
+        keyed["__positional__"] = positional
+        return keyed
+    if keyed:
 # __WRB_ASSEMBLY_GUARD_1_0__
 # __WRB_ASSEMBLY_GUARD_1_1__
 # __WRB_ASSEMBLY_GUARD_1_2__
