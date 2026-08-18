@@ -14,7 +14,224 @@ __WRB_PART_1__
 # __WRB_ASSEMBLY_GUARD_1_4__
 # __WRB_ASSEMBLY_GUARD_1_5__
 # __WRB_ASSEMBLY_GUARD_1_6__
-__WRB_PART_2__
+        return keyed
+    return positional
+
+
+def extract_rules_from_text(text: str, path: Path) -> list[LuaRule]:
+    rules: list[LuaRule] = []
+    pattern = re.compile(r"(?<![\w.])(hl\.window_rule|rule)\s*\(")
+    for match in pattern.finditer(text):
+        call_name = match.group(1)
+        open_paren = text.find("(", match.start(), match.end() + 1)
+        if open_paren < 0:
+            continue
+        end = _scan_balanced(text, open_paren, "(", ")")
+        if end is None:
+            continue
+        raw = text[match.start() : end]
+        args_text = text[open_paren + 1 : end - 1]
+        args = _split_top_level(args_text)
+        line = text.count("\n", 0, match.start()) + 1
+
+        name = f"{path.name}:{line}"
+        match_table: dict[str, Any] = {}
+        effects: dict[str, Any] = {}
+        unknown: set[str] = set()
+
+        if call_name == "rule" and len(args) >= 3:
+            # Only analyze literal helper calls. This skips the helper function
+            # signature itself and arbitrary computed match/effect tables.
+            if not args[1].lstrip().startswith("{") or not args[2].lstrip().startswith("{"):
+                continue
+            parsed_name = _unquote_lua(args[0])
+            if parsed_name:
+                name = parsed_name
+            parsed_match = _parse_lua_value(args[1])
+            parsed_effects = _parse_lua_value(args[2])
+            if isinstance(parsed_match, dict):
+                match_table = parsed_match
+            else:
+                unknown.add("<match-table>")
+            if isinstance(parsed_effects, dict):
+                effects = parsed_effects
+        elif call_name == "hl.window_rule" and args:
+            # Computed tables are valid Lua, but cannot be resolved safely by
+            # this static analyzer.
+            if not args[0].lstrip().startswith("{"):
+                continue
+            parsed = _parse_lua_value(args[0])
+            if isinstance(parsed, dict):
+                parsed_name = parsed.pop("name", None)
+                if isinstance(parsed_name, str):
+                    name = parsed_name
+                parsed_match = parsed.pop("match", None)
+                if isinstance(parsed_match, dict):
+                    match_table = parsed_match
+                else:
+                    unknown.add("<match-table>")
+                effects = parsed
+        if match_table or unknown:
+            rules.append(
+                LuaRule(
+                    name=name,
+                    match=match_table,
+                    effects=effects,
+                    file=path,
+                    line=line,
+                    raw=raw,
+                    unknown_match=unknown,
+                )
+            )
+    return rules
+
+
+def scan_lua_rules(config_dir: Path) -> list[LuaRule]:
+    rules: list[LuaRule] = []
+    if not config_dir.exists():
+        return rules
+    for path in sorted(config_dir.rglob("*.lua")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        rules.extend(extract_rules_from_text(text, path))
+    return rules
+
+
+def regex_matches(pattern: str, value: str) -> bool | None:
+    negate = False
+    if pattern.startswith("negative:"):
+        negate = True
+        pattern = pattern[len("negative:") :]
+    try:
+        result = re.search(pattern, value) is not None
+    except re.error:
+        return None
+    return not result if negate else result
+
+
+def _normalize_tag(tag: str) -> str:
+    return tag[:-1] if tag.endswith("*") else tag
+
+
+def eval_match_field(
+    key: str,
+    expected: Any,
+    client: dict[str, Any],
+    active_addr: str,
+) -> bool | None:
+    if isinstance(expected, dict) and "__lua__" in expected:
+        return None
+
+    if key == "class":
+        return regex_matches(str(expected), str(client.get("class") or ""))
+    if key == "title":
+        return regex_matches(str(expected), str(client.get("title") or ""))
+    if key == "initial_class":
+        return regex_matches(str(expected), str(client.get("initialClass") or ""))
+    if key == "initial_title":
+        return regex_matches(str(expected), str(client.get("initialTitle") or ""))
+    if key == "xdg_tag":
+        return regex_matches(str(expected), str(client.get("xdgTag") or ""))
+    if key == "tag":
+        wanted = _normalize_tag(str(expected).lstrip("+-"))
+        tags = {_normalize_tag(t) for t in client_tags(client)}
+        return wanted in tags
+    if key == "xwayland":
+        return bool(client.get("xwayland")) is bool(expected)
+    if key == "float":
+        return bool(client.get("floating")) is bool(expected)
+    if key == "fullscreen":
+        return bool(int(client.get("fullscreen") or 0)) is bool(expected)
+    if key == "pin":
+        return bool(client.get("pinned")) is bool(expected)
+    if key == "focus":
+        return (str(client.get("address")) == active_addr) is bool(expected)
+    if key == "group":
+        grouped = client.get("grouped") or []
+        return bool(grouped) is bool(expected)
+    if key == "fullscreen_state_internal":
+        return int(client.get("fullscreen") or 0) == int(expected)
+    if key == "fullscreen_state_client":
+        return int(client.get("fullscreenClient") or 0) == int(expected)
+    if key == "workspace":
+        ws_id, ws_name = client_workspace(client)
+        exp = str(expected)
+        if exp.startswith("name:"):
+            return ws_name == exp[5:]
+        if exp.isdigit() or (exp.startswith("-") and exp[1:].isdigit()):
+            return str(ws_id) == exp
+        return None
+    if key == "content":
+        current = client.get("content") or client.get("contentType")
+        if current is None:
+            return None
+        return str(current) == str(expected)
+    if key == "modal":
+        if "modal" not in client:
+            return None
+        return bool(client.get("modal")) is bool(expected)
+    return None
+
+
+def matching_rules(
+    rules: Iterable[LuaRule],
+    client: dict[str, Any],
+    active_addr: str,
+) -> list[tuple[str, LuaRule, list[str]]]:
+    results: list[tuple[str, LuaRule, list[str]]] = []
+    for rule in rules:
+        unknown = list(rule.unknown_match)
+        failed = False
+        for key, expected in rule.match.items():
+            state = eval_match_field(key, expected, client, active_addr)
+            if state is False:
+                failed = True
+                break
+            if state is None:
+                unknown.append(key)
+        if failed:
+            continue
+        status = "MATCH" if not unknown else "POSSIBLE"
+        results.append((status, rule, sorted(set(unknown))))
+    return results
+
+
+def summarize_value(value: Any) -> str:
+    if isinstance(value, dict) and "__lua__" in value:
+        return str(value["__lua__"])
+    if isinstance(value, dict):
+        return "{ " + ", ".join(f"{k}={summarize_value(v)}" for k, v in value.items()) + " }"
+    if isinstance(value, list):
+        return "{ " + ", ".join(summarize_value(v) for v in value) + " }"
+    if isinstance(value, str):
+        return repr(value)
+    return str(value)
+
+
+def print_matching_rules(matches: list[tuple[str, LuaRule, list[str]]], config_dir: Path) -> None:
+    print()
+    print("Existing rules affecting this window")
+    print("=" * min(80, terminal_width()))
+    if not matches:
+        print("(No literal Lua rules matched.)")
+        return
+    for status, rule, unknown in matches:
+        try:
+            rel = rule.file.relative_to(config_dir)
+        except ValueError:
+            rel = rule.file
+        effects = ", ".join(f"{k}={summarize_value(v)}" for k, v in rule.effects.items())
+        if not effects:
+            effects = "(effects could not be parsed)"
+        suffix = f"  unknown match fields: {', '.join(unknown)}" if unknown else ""
+        print(f"[{status:<8}] {rule.name}  {rel}:{rule.line}")
+        print(f"           {effects}{suffix}")
+
+
+# ---------- Rule builder ----------
+
 # __WRB_ASSEMBLY_GUARD_2_0__
 # __WRB_ASSEMBLY_GUARD_2_1__
 # __WRB_ASSEMBLY_GUARD_2_2__
