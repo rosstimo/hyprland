@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Launcher and small UX overrides for hypr-window-rule-builder."""
+"""UX and late-title support for hypr-window-rule-builder."""
 
 from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -25,9 +26,50 @@ if spec is None or spec.loader is None:
 core = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = core
 spec.loader.exec_module(core)
-core.VERSION = "0.3.1"
+core.VERSION = "0.4.0"
 
 _original_fzf_select = core.fzf_select
+_original_render_rule = core.render_rule
+
+STATIC_EFFECTS = {
+    "float",
+    "tile",
+    "fullscreen",
+    "maximize",
+    "fullscreen_state",
+    "move",
+    "size",
+    "center",
+    "pseudo",
+    "monitor",
+    "workspace",
+    "no_initial_focus",
+    "pin",
+    "group",
+    "suppress_event",
+    "content",
+    "no_close_for",
+    "scrolling_width",
+}
+
+HANDLER_EFFECTS = {
+    "float",
+    "tile",
+    "fullscreen",
+    "maximize",
+    "move",
+    "size",
+    "center",
+    "pseudo",
+    "monitor",
+    "workspace",
+    "pin",
+}
+
+_render_mode = "rule"
+_render_client: dict[str, Any] | None = None
+_render_signature: tuple[Any, ...] | None = None
+_render_choice: str | None = None
 
 
 def fzf_select(
@@ -137,12 +179,218 @@ def manually_adjust_and_capture(
     client: dict[str, Any],
     monitors: list[dict[str, Any]],
 ):
-    result = _original_manual_capture(client, monitors)
+    refreshed, refreshed_monitors, effects = _original_manual_capture(client, monitors)
+
     print(
         "Workspace and monitor are captured as draft properties. "
         "Select either one and press Enter to keep, change, or remove it."
     )
-    return result
+
+    if refreshed.get("floating"):
+        captured = effects.get("move", "not captured")
+        choice = core.fzf_select(
+            [
+                ("captured", f"Use captured position ({captured})"),
+                ("center", "Center the floating window on its monitor"),
+                ("unset", "Do not set a position"),
+            ],
+            "Placement>",
+            header="Choose the future placement. You do not need to eyeball centering.",
+        )[0]
+        effects.pop("center", None)
+        if choice == "center":
+            effects.pop("move", None)
+            effects["center"] = "true"
+        elif choice == "unset":
+            effects.pop("move", None)
+
+    return refreshed, refreshed_monitors, effects
+
+
+def _vec2(value: str) -> tuple[str, str] | None:
+    match = re.fullmatch(r"\{\s*(.+?)\s*,\s*(.+?)\s*\}", value.strip(), flags=re.S)
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _dispatcher_lines(effects: dict[str, str]) -> list[str]:
+    lines: list[str] = []
+
+    if "float" in effects:
+        action = "set" if effects["float"] == "true" else "unset"
+        lines.append(f'    hl.dispatch(hl.dsp.window.float({{ action = "{action}", window = w }}))')
+    if effects.get("tile") == "true":
+        lines.append('    hl.dispatch(hl.dsp.window.float({ action = "unset", window = w }))')
+
+    if "workspace" in effects:
+        lines.append(
+            f"    hl.dispatch(hl.dsp.window.move({{ workspace = {effects['workspace']}, follow = false, window = w }}))"
+        )
+    if "monitor" in effects:
+        lines.append(
+            f"    hl.dispatch(hl.dsp.window.move({{ monitor = {effects['monitor']}, follow = false, window = w }}))"
+        )
+
+    if "size" in effects:
+        vec = _vec2(effects["size"])
+        if vec:
+            lines.append(
+                f"    hl.dispatch(hl.dsp.window.resize({{ x = {vec[0]}, y = {vec[1]}, window = w }}))"
+            )
+
+    if effects.get("center") == "true":
+        lines.append("    hl.dispatch(hl.dsp.window.center({ window = w }))")
+    elif "move" in effects:
+        vec = _vec2(effects["move"])
+        if vec:
+            lines.append(
+                f"    hl.dispatch(hl.dsp.window.move({{ x = {vec[0]}, y = {vec[1]}, window = w }}))"
+            )
+
+    if "fullscreen" in effects:
+        action = "set" if effects["fullscreen"] == "true" else "unset"
+        lines.append(
+            f'    hl.dispatch(hl.dsp.window.fullscreen({{ mode = "fullscreen", action = "{action}", window = w }}))'
+        )
+    if "maximize" in effects:
+        action = "set" if effects["maximize"] == "true" else "unset"
+        lines.append(
+            f'    hl.dispatch(hl.dsp.window.fullscreen({{ mode = "maximized", action = "{action}", window = w }}))'
+        )
+    if "pseudo" in effects:
+        action = "set" if effects["pseudo"] == "true" else "unset"
+        lines.append(f'    hl.dispatch(hl.dsp.window.pseudo({{ action = "{action}", window = w }}))')
+    if "pin" in effects:
+        action = "set" if effects["pin"] == "true" else "unset"
+        lines.append(f'    hl.dispatch(hl.dsp.window.pin({{ action = "{action}", window = w }}))')
+
+    return lines
+
+
+def _render_title_handler(
+    name: str,
+    client: dict[str, Any],
+    effects: dict[str, str],
+) -> str:
+    cls = str(client.get("class") or "")
+    title = str(client.get("title") or "")
+    handler_effects = {k: v for k, v in effects.items() if k in HANDLER_EFFECTS}
+    lines = [
+        f"-- Late-title handler generated by hypr-window-rule-builder: {name}",
+        'hl.on("window.title", function(w)',
+        "  if w ~= nil",
+    ]
+    if cls:
+        lines.append(f"      and w.class == {core.lua_quote(cls)}")
+    lines.append(f"      and w.title == {core.lua_quote(title)} then")
+    lines.extend(_dispatcher_lines(handler_effects))
+    lines.extend([
+        "  end",
+        "end)",
+    ])
+    return "\n".join(lines)
+
+
+def _late_title_problem(
+    matchers: dict[str, str],
+    effects: dict[str, str],
+    client: dict[str, Any],
+) -> tuple[bool, set[str], set[str]]:
+    current_title = str(client.get("title") or "")
+    initial_title = str(client.get("initialTitle") or "")
+    selected_static = set(effects) & STATIC_EFFECTS
+    supported = selected_static & HANDLER_EFFECTS
+    unsupported = selected_static - HANDLER_EFFECTS
+    problem = (
+        "title" in matchers
+        and bool(selected_static)
+        and bool(current_title)
+        and current_title != initial_title
+    )
+    return problem, supported, unsupported
+
+
+def warn_about_static_title_match(
+    matchers: dict[str, str],
+    effects: dict[str, str],
+    client: dict[str, Any],
+) -> None:
+    global _render_mode, _render_client, _render_signature, _render_choice
+
+    problem, supported, unsupported = _late_title_problem(matchers, effects, client)
+    _render_client = client
+    if not problem:
+        _render_mode = "rule"
+        _render_signature = None
+        _render_choice = None
+        return
+
+    signature = (
+        tuple(sorted(matchers.items())),
+        tuple(sorted(effects.items())),
+        str(client.get("class") or ""),
+        str(client.get("title") or ""),
+        str(client.get("initialTitle") or ""),
+    )
+
+    print()
+    print("LATE-TITLE WINDOW DETECTED")
+    print("The current title differs from the initial title, but this draft contains")
+    print("startup/static behavior. A normal window rule cannot apply those effects")
+    print("when it only becomes identifiable after its title changes.")
+
+    if unsupported:
+        print()
+        print("Automatic title-handler conversion does not yet support:")
+        print("  " + ", ".join(sorted(unsupported)))
+        print("Remove those properties if you want automatic handler generation.")
+        _render_mode = "rule"
+        _render_signature = signature
+        _render_choice = "rule"
+        return
+
+    if not supported:
+        _render_mode = "rule"
+        return
+
+    if signature != _render_signature:
+        _render_signature = signature
+        _render_choice = None
+
+    if _render_choice is None:
+        _render_choice = core.fzf_select(
+            [
+                ("handler", "Generate title-change handler  |  recommended"),
+                ("rule", "Generate normal window rule anyway"),
+            ],
+            "Late title>",
+            header="Hyprland recommends an event listener for static effects after a title change.",
+        )[0]
+
+    _render_mode = _render_choice
+
+
+def render_rule(
+    name: str,
+    matchers: dict[str, str],
+    effects: dict[str, str],
+    use_helper: bool,
+) -> str:
+    if _render_mode != "handler" or _render_client is None:
+        return _original_render_rule(name, matchers, effects, use_helper)
+
+    handler_effects = {k: v for k, v in effects.items() if k in HANDLER_EFFECTS}
+    remaining_effects = {k: v for k, v in effects.items() if k not in HANDLER_EFFECTS}
+    parts = [_render_title_handler(name, _render_client, handler_effects)]
+
+    if remaining_effects:
+        parts.append(
+            "-- Dynamic/non-handler properties can still use the normal rule matcher.\n"
+            + _original_render_rule(name, matchers, remaining_effects, use_helper)
+        )
+
+    return "\n\n".join(parts)
 
 
 core.fzf_select = fzf_select
@@ -150,5 +398,7 @@ core._edit_workspace = _edit_workspace
 core._edit_monitor = _edit_monitor
 core.capture_window_state = capture_window_state
 core.manually_adjust_and_capture = manually_adjust_and_capture
+core.warn_about_static_title_match = warn_about_static_title_match
+core.render_rule = render_rule
 
 raise SystemExit(core.entrypoint())
