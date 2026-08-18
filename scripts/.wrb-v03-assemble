@@ -38,7 +38,193 @@ __WRB_PART_4__
 # __WRB_ASSEMBLY_GUARD_4_4__
 # __WRB_ASSEMBLY_GUARD_4_5__
 # __WRB_ASSEMBLY_GUARD_4_6__
-__WRB_PART_5__
+            effects.pop("suppress_event", None)
+        else:
+            effects["suppress_event"] = lua_quote(prompt_value("Suppressed events", "maximize"))
+    elif key == "content":
+        value = choose_enum("Content", ["unchanged", "none", "photo", "video", "game"], "unchanged")
+        if value == "unchanged":
+            effects.pop("content", None)
+        else:
+            effects["content"] = lua_quote(value)
+    elif key == "custom":
+        effect_name = prompt_value("Effect name")
+        if effect_name:
+            lua_value = prompt_value("Lua value", effects.get(effect_name, "true"))
+            effects[effect_name] = lua_value
+
+
+def _property_entries(effects: dict[str, str], client: dict[str, Any]) -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = [
+        ("done", "Done editing properties"),
+        ("mode", f"Window mode                 {_effect_value_summary('mode', effects, client)}"),
+        ("size", f"Size                        {_effect_value_summary('size', effects, client)}"),
+        ("position", f"Position                    {_effect_value_summary('position', effects, client)}"),
+    ]
+    for key, label, help_text in BOOLEAN_EFFECTS:
+        value = _effect_value_summary(key, effects, client)
+        entries.append((f"bool:{key}", f"{label:<27} {value:<28} {help_text}"))
+    ws = effects.get("workspace", "unchanged")
+    mon = effects.get("monitor", "unchanged")
+    entries.extend([
+        ("other:workspace", f"{'Workspace':<27} {ws}"),
+        ("other:monitor", f"{'Monitor':<27} {mon}"),
+        ("other:idle_inhibit", f"{'Idle inhibit':<27} {effects.get('idle_inhibit', 'unchanged')}"),
+        ("other:opacity", f"{'Opacity':<27} {effects.get('opacity', 'unchanged')}"),
+        ("other:rounding", f"{'Rounding':<27} {effects.get('rounding', 'unchanged')}"),
+        ("other:border_size", f"{'Border size':<27} {effects.get('border_size', 'unchanged')}"),
+        ("other:tag", f"{'Tag':<27} {effects.get('tag', 'unchanged')}"),
+        ("other:suppress_event", f"{'Suppress event':<27} {effects.get('suppress_event', 'unchanged')}"),
+        ("other:content", f"{'Content type':<27} {effects.get('content', 'unchanged')}"),
+        ("other:custom", "Custom effect..."),
+    ])
+    return entries
+
+
+def edit_effects_draft(
+    client: dict[str, Any],
+    monitors: list[dict[str, Any]],
+    effects: dict[str, str] | None = None,
+) -> dict[str, str]:
+    effects = dict(effects or {})
+    while True:
+        print()
+        print("Rule properties")
+        selected = fzf_select(
+            _property_entries(effects, client),
+            "Property>",
+            header="Select a property to edit it. Values shown as 'unchanged' will not appear in the rule.",
+        )[0]
+        if selected == "done":
+            break
+        if selected == "mode":
+            _edit_mode(effects, client)
+        elif selected == "size":
+            _edit_size(effects, client)
+        elif selected == "position":
+            _edit_position(effects, client, monitors)
+        elif selected.startswith("bool:"):
+            key = selected.split(":", 1)[1]
+            label = next(label for item_key, label, _ in BOOLEAN_EFFECTS if item_key == key)
+            _edit_boolean_effect(effects, client, key, label)
+        elif selected.startswith("other:"):
+            _edit_other_effect(effects, client, monitors, selected.split(":", 1)[1])
+
+    # Defensive conflict cleanup.
+    if effects.get("float") == "true":
+        effects.pop("tile", None)
+    if effects.get("tile") == "true":
+        effects.pop("float", None)
+        effects.pop("size", None)
+        effects.pop("move", None)
+        effects.pop("center", None)
+    if effects.get("center") == "true":
+        effects.pop("move", None)
+    return effects
+
+
+def capture_window_state(client: dict[str, Any], monitors: list[dict[str, Any]]) -> dict[str, str]:
+    """Capture the selected live window as an editable rule-property draft."""
+    effects: dict[str, str] = {}
+    if client.get("floating"):
+        effects["float"] = "true"
+        size = client.get("size") or []
+        pos = mon_local_position(client, monitors)
+        if isinstance(size, list) and len(size) >= 2:
+            effects["size"] = f"{{ {int(size[0])}, {int(size[1])} }}"
+        if pos:
+            effects["move"] = f"{{ {pos[0]}, {pos[1]} }}"
+    else:
+        effects["tile"] = "true"
+
+    fullscreen, maximized = client_fullscreen_flags(client)
+    effects["fullscreen"] = bool_lua(fullscreen)
+    effects["maximize"] = bool_lua(maximized)
+    effects["pin"] = bool_lua(bool(client.get("pinned")))
+    if "pseudo" in client:
+        effects["pseudo"] = bool_lua(bool(client.get("pseudo")))
+
+    ws_id, ws_name = client_workspace(client)
+    if ws_id != "":
+        effects["workspace"] = lua_quote(str(ws_id))
+    elif ws_name:
+        effects["workspace"] = lua_quote(f"name:{ws_name}")
+
+    mon = monitor_for_client(client, monitors)
+    if mon and mon.get("name"):
+        effects["monitor"] = lua_quote(str(mon["name"]))
+    return effects
+
+
+def refresh_selected_window(address: str) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
+    clients = run_json("clients")
+    monitors = run_json("monitors")
+    active = run_json("activewindow")
+    if not isinstance(clients, list):
+        raise RuntimeError("Hyprland did not return a client list while capturing the window.")
+    refreshed = next((c for c in clients if str(c.get("address") or "") == address), None)
+    if not refreshed:
+        raise RuntimeError("The selected window closed before its state could be captured.")
+    if not isinstance(monitors, list):
+        monitors = []
+    active_addr = str(active.get("address") or "") if isinstance(active, dict) else ""
+    return refreshed, monitors, active_addr
+
+
+def manually_adjust_and_capture(
+    client: dict[str, Any],
+    monitors: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, str]]:
+    print()
+    print("Manual window capture")
+    print("=" * min(80, terminal_width()))
+    print("Leave this terminal open. Adjust the selected window however you want:")
+    print("float/tile it, move it, resize it, maximize/fullscreen it, or pin/unpin it.")
+    print("When it looks right, return to this terminal and press Enter.")
+    input("Press Enter to capture the adjusted window...")
+
+    address = str(client.get("address") or "")
+    refreshed, refreshed_monitors, active_addr = refresh_selected_window(address)
+    print()
+    print("Captured live state")
+    print_client(refreshed, refreshed_monitors, active_addr)
+    effects = capture_window_state(refreshed, refreshed_monitors)
+    print()
+    print("The capture is only a draft. You can change or remove any captured property next.")
+    return refreshed, refreshed_monitors, effects
+
+
+def build_effects(
+    client: dict[str, Any],
+    monitors: list[dict[str, Any]],
+) -> tuple[dict[str, str], dict[str, Any], list[dict[str, Any]]]:
+    print()
+    print("Window behavior")
+    workflow = fzf_select(
+        [
+            ("adjust", "Adjust the live window manually, then capture it"),
+            ("current", "Capture the window exactly as it is now"),
+            ("manual", "Build the rule properties manually"),
+        ],
+        "Behavior>",
+        header="Captured state becomes an editable draft before any rule is generated.",
+    )[0]
+
+    draft: dict[str, str] = {}
+    working_client = client
+    working_monitors = monitors
+    if workflow == "adjust":
+        working_client, working_monitors, draft = manually_adjust_and_capture(client, monitors)
+    elif workflow == "current":
+        draft = capture_window_state(client, monitors)
+        print("Captured current state as a draft. Review it in the property editor.")
+
+    effects = edit_effects_draft(working_client, working_monitors, draft)
+    if not effects:
+        print("No behavior changes are currently in the rule.")
+    return effects, working_client, working_monitors
+
+
 # __WRB_ASSEMBLY_GUARD_5_0__
 # __WRB_ASSEMBLY_GUARD_5_1__
 # __WRB_ASSEMBLY_GUARD_5_2__
