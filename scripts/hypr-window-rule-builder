@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 '''
-hypr-rule-builder
+hypr-window-rule-builder
 Interactive Hyprland Lua window-rule builder.
 
 Designed for Hyprland >= 0.55 Lua configuration.
@@ -30,7 +30,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 MATCH_FIELDS = (
     "class",
@@ -103,6 +103,10 @@ class LuaRule:
     unknown_match: set[str] = field(default_factory=set)
 
 
+class UserCancelled(Exception):
+    """Raised when the user intentionally cancels an interactive step."""
+
+
 def eprint(*args: Any, **kwargs: Any) -> None:
     print(*args, file=sys.stderr, **kwargs)
 
@@ -154,6 +158,7 @@ def fzf_select(
     fzf = shutil.which("fzf")
     if fzf and sys.stdin.isatty() and sys.stdout.isatty():
         rows = [f"{key}\t{display}" for key, display in entries]
+        full_header = "Esc cancels" if not header else f"{header}  |  Esc cancels"
         cmd = [
             fzf,
             "--ansi",
@@ -163,11 +168,10 @@ def fzf_select(
             "--border",
             "--height=90%",
             f"--prompt={prompt} ",
+            f"--header={full_header}",
         ]
         if multi:
             cmd.extend(["--multi", "--bind=space:toggle"])
-        if header:
-            cmd.append(f"--header={header}")
         proc = subprocess.run(
             cmd,
             input="\n".join(rows) + "\n",
@@ -175,18 +179,17 @@ def fzf_select(
             stdout=subprocess.PIPE,
         )
         if proc.returncode != 0:
-            return []
-        selected = []
-        for line in proc.stdout.splitlines():
-            selected.append(line.split("\t", 1)[0])
-        return selected
+            raise UserCancelled
+        return [line.split("\t", 1)[0] for line in proc.stdout.splitlines()]
 
     print()
     print(prompt)
     for i, (_, display) in enumerate(entries, 1):
         print(f"  {i:>2}. {display}")
     if multi:
-        raw = input("Choose numbers separated by spaces (blank cancels): ").strip()
+        raw = input("Choose numbers separated by spaces (blank = none, q = cancel): ").strip()
+        if raw.lower() in {"q", "quit", "cancel"}:
+            raise UserCancelled
         if not raw:
             return []
         out: list[str] = []
@@ -194,9 +197,11 @@ def fzf_select(
             if token.isdigit() and 1 <= int(token) <= len(entries):
                 out.append(entries[int(token) - 1][0])
         return out
-    raw = input("Choose number (blank cancels): ").strip()
+    raw = input("Choose number (q = cancel): ").strip()
+    if raw.lower() in {"q", "quit", "cancel"} or not raw:
+        raise UserCancelled
     if not raw.isdigit() or not (1 <= int(raw) <= len(entries)):
-        return []
+        raise UserCancelled
     return [entries[int(raw) - 1][0]]
 
 
@@ -764,26 +769,16 @@ def matcher_entries(client: dict[str, Any], active_addr: str) -> list[tuple[str,
     return entries
 
 
-def build_match(client: dict[str, Any], active_addr: str) -> dict[str, str]:
-    defaults = ["class"] if client.get("class") else ["initial_class"]
-    print()
-    print("Select match fields. Space toggles items in fzf; Enter accepts.")
-    entries = matcher_entries(client, active_addr)
-    selected = fzf_select(
-        entries,
-        "Match>",
-        multi=True,
-        header="Select one or more. Class is usually the best starting point.",
-    )
-    if not selected:
-        selected = defaults
-        print(f"No match fields selected; using {defaults[0]}.")
-
+def _edit_matchers(
+    fields: list[str],
+    client: dict[str, Any],
+    active_addr: str,
+) -> dict[str, str]:
     out: dict[str, str] = {}
     print()
     print("Matcher values")
-    print("Enter keeps the current-derived value. You can type any Hyprland matcher value.")
-    for field in selected:
+    print("Press Enter to keep each suggested value.")
+    for field in fields:
         default = matcher_default(field, client, active_addr)
         if field in BOOL_MATCH_FIELDS:
             value = prompt_value(field, default or "false").lower()
@@ -794,10 +789,74 @@ def build_match(client: dict[str, Any], active_addr: str) -> dict[str, str]:
             value = prompt_value(field, default)
         if value:
             out[field] = value
+    return out
+
+
+def build_match(client: dict[str, Any], active_addr: str) -> dict[str, str]:
+    cls = str(client.get("class") or "")
+    title = str(client.get("title") or "")
+    initial_cls = str(client.get("initialClass") or "")
+    initial_title = str(client.get("initialTitle") or "")
+
+    profiles: list[tuple[str, str]] = []
+    if cls:
+        profiles.append((
+            "app",
+            f"All {truncate(cls, 36)} windows  |  match class only",
+        ))
+    if cls and title:
+        profiles.append((
+            "window",
+            f"This window/dialog only  |  class + current title: {truncate(title, 42)}",
+        ))
+    if initial_cls and initial_title:
+        profiles.append((
+            "initial",
+            f"Launch identity  |  initial class + initial title: {truncate(initial_title, 38)}",
+        ))
+    profiles.append(("custom", "Custom match fields  |  advanced"))
+
+    print()
+    print("How should this rule identify the window?")
+    selected = fzf_select(
+        profiles,
+        "Identify>",
+        header="For dialogs/popups, class + title is usually the safer choice.",
+    )[0]
+
+    if selected == "app":
+        fields = ["class"]
+    elif selected == "window":
+        fields = ["class", "title"]
+    elif selected == "initial":
+        fields = ["initial_class", "initial_title"]
+    else:
+        print()
+        print("Select match fields. Space toggles items; Enter accepts.")
+        fields = fzf_select(
+            matcher_entries(client, active_addr),
+            "Match>",
+            multi=True,
+            header="Select one or more fields. Enter with nothing selected is not allowed.",
+        )
+        if not fields:
+            print("A rule needs at least one match field.")
+            raise UserCancelled
+
+    out = {field: matcher_default(field, client, active_addr) for field in fields}
+    out = {field: value for field, value in out.items() if value != ""}
+
+    print()
+    print("Match preview")
+    print("=" * min(80, terminal_width()))
+    for field, value in out.items():
+        print(f"{field:<15} {value}")
+    if prompt_yes_no("Edit these matcher values?", False):
+        out = _edit_matchers(fields, client, active_addr)
 
     if not out:
-        cls = str(client.get("class") or client.get("initialClass") or ".*")
-        out["class"] = exact_regex(cls) if cls != ".*" else ".*"
+        print("No usable matcher values were produced.")
+        raise UserCancelled
     return out
 
 
@@ -869,49 +928,119 @@ def parse_vec2_prompt(label: str, default: tuple[Any, Any] | None = None) -> str
     return f"{{ {item(x)}, {item(y)} }}"
 
 
+def _resolve_effect_conflicts(effects: dict[str, str]) -> None:
+    if effects.get("float") == "true" and effects.get("tile") == "true":
+        choice = fzf_select(
+            [("float", "Keep Float and remove Tile"), ("tile", "Keep Tile and remove Float")],
+            "Conflict>",
+            header="A window rule cannot sensibly request both float and tile.",
+        )[0]
+        effects.pop("tile" if choice == "float" else "float", None)
+
+    if "center" in effects and "move" in effects:
+        choice = fzf_select(
+            [("center", "Keep Center and remove Position"), ("move", "Keep Position and remove Center")],
+            "Conflict>",
+            header="Center and an explicit move position fight each other.",
+        )[0]
+        effects.pop("move" if choice == "center" else "center", None)
+
+
 def build_effects(client: dict[str, Any], monitors: list[dict[str, Any]]) -> dict[str, str]:
     size = client.get("size") or []
     pos = mon_local_position(client, monitors)
     ws_id, ws_name = client_workspace(client)
     mon = monitor_for_client(client, monitors)
+    current_mode = "floating" if client.get("floating") else "tiled"
 
-    dynamic_entries: list[tuple[str, str]] = []
+    effects: dict[str, str] = {}
+
+    print()
+    print("Window behavior")
+    mode = fzf_select(
+        [
+            ("unchanged", "Leave float/tile mode unchanged"),
+            ("float", "Float this window"),
+            ("tile", "Tile this window"),
+            ("current", f"Remember current mode ({current_mode})"),
+        ],
+        "Mode>",
+        header="Choose exactly one window mode. This prevents float/tile conflicts.",
+    )[0]
+
+    effective_mode = current_mode if mode == "current" else mode
+    if effective_mode == "float":
+        effects["float"] = "true"
+    elif effective_mode == "tile":
+        effects["tile"] = "true"
+
+    # Geometry is meaningful for a floating window. If mode is unchanged, offer it
+    # only when the selected window is already floating.
+    geometry_allowed = effective_mode == "float" or (mode == "unchanged" and client.get("floating"))
+    if geometry_allowed:
+        if isinstance(size, list) and len(size) >= 2:
+            size_choice = fzf_select(
+                [
+                    ("unchanged", "Leave size unchanged"),
+                    ("current", f"Use current size ({size[0]} x {size[1]})"),
+                    ("custom", "Set a custom size"),
+                ],
+                "Size>",
+                header="Size is independent of float/tile mode.",
+            )[0]
+            if size_choice == "current":
+                effects["size"] = f"{{ {int(size[0])}, {int(size[1])} }}"
+            elif size_choice == "custom":
+                effects["size"] = parse_vec2_prompt("Size", (size[0], size[1]))
+
+        position_entries = [("unchanged", "Leave position unchanged"), ("center", "Center the window")]
+        if pos:
+            position_entries.append(("current", f"Use current position ({pos[0]}, {pos[1]} monitor-local)"))
+        position_entries.append(("custom", "Set a custom position"))
+        position_choice = fzf_select(
+            position_entries,
+            "Position>",
+            header="Choose one position behavior.",
+        )[0]
+        if position_choice == "center":
+            effects["center"] = "true"
+        elif position_choice == "current" and pos:
+            effects["move"] = f"{{ {pos[0]}, {pos[1]} }}"
+        elif position_choice == "custom":
+            effects["move"] = parse_vec2_prompt("Position", pos)
+
+    skip_keys = {
+        "capture_state", "float", "tile", "center",
+        "size_current", "move_current", "size_custom", "move_custom",
+    }
+    advanced_entries: list[tuple[str, str]] = []
     for key, label, help_text in EFFECT_MENU:
-        if key == "size_current" and len(size) >= 2:
-            help_text = f"{size[0]} x {size[1]}"
-        elif key == "move_current" and pos:
-            help_text = f"{pos[0]}, {pos[1]} monitor-local"
-        elif key == "workspace_current":
+        if key in skip_keys:
+            continue
+        if key == "workspace_current":
             help_text = str(ws_name or ws_id)
         elif key == "monitor_current":
             help_text = str((mon or {}).get("name") or client.get("monitor") or "")
-        elif key == "capture_state":
-            state = "floating" if client.get("floating") else "tiled"
-            if len(size) >= 2:
-                state += f", {size[0]}x{size[1]}"
-            help_text = state
-        dynamic_entries.append((key, f"{label:<26} {help_text}"))
+        advanced_entries.append((key, f"{label:<26} {help_text}"))
 
     print()
-    print("Select effects. Space toggles items in fzf; Enter accepts.")
+    print("Optional effects")
     selected = fzf_select(
-        dynamic_entries,
-        "Effects>",
+        advanced_entries,
+        "More>",
         multi=True,
-        header="Current-state options grab values from the selected live window.",
+        header="Optional. Space toggles items. Enter with nothing selected continues.",
     )
 
-    effects: dict[str, str] = {}
-    if "capture_state" in selected:
-        effects.update(current_state_effects(client, monitors))
+    if "workspace_current" in selected and "workspace_custom" in selected:
+        selected.remove("workspace_current")
+        print("Both current and custom workspace were selected; custom workspace wins.")
+    if "monitor_current" in selected and "monitor_custom" in selected:
+        selected.remove("monitor_current")
+        print("Both current and custom monitor were selected; custom monitor wins.")
 
     for key in selected:
-        if key == "capture_state":
-            continue
         if key in {
-            "float",
-            "tile",
-            "center",
             "fullscreen",
             "maximize",
             "pin",
@@ -932,10 +1061,6 @@ def build_effects(client: dict[str, Any], monitors: list[dict[str, Any]]) -> dic
             effects[key] = "true"
         elif key == "focus_on_activate_false":
             effects["focus_on_activate"] = "false"
-        elif key == "size_current" and len(size) >= 2:
-            effects["size"] = f"{{ {int(size[0])}, {int(size[1])} }}"
-        elif key == "move_current" and pos:
-            effects["move"] = f"{{ {pos[0]}, {pos[1]} }}"
         elif key == "workspace_current":
             if ws_id != "":
                 effects["workspace"] = lua_quote(str(ws_id))
@@ -958,11 +1083,6 @@ def build_effects(client: dict[str, Any], monitors: list[dict[str, Any]]) -> dic
             effects["workspace"] = lua_quote(prompt_value("Workspace", str(ws_id or ws_name or "1")))
         elif key == "monitor_custom":
             effects["monitor"] = lua_quote(prompt_value("Monitor", str((mon or {}).get("name") or "")))
-        elif key == "size_custom":
-            default = (size[0], size[1]) if len(size) >= 2 else None
-            effects["size"] = parse_vec2_prompt("Size", default)
-        elif key == "move_custom":
-            effects["move"] = parse_vec2_prompt("Position", pos)
         elif key == "suppress_event":
             effects["suppress_event"] = lua_quote(prompt_value("Suppressed events", "maximize"))
         elif key == "content":
@@ -978,8 +1098,10 @@ def build_effects(client: dict[str, Any], monitors: list[dict[str, Any]]) -> dic
                 if not prompt_yes_no("Add another custom effect?", False):
                     break
 
+    _resolve_effect_conflicts(effects)
+
     if not effects:
-        print("No effects selected.")
+        print("No behavior changes were selected.")
     return effects
 
 
@@ -1059,19 +1181,39 @@ def copy_clipboard(text: str) -> bool:
     return proc.returncode == 0
 
 
-def open_editor(path: Path) -> None:
+def open_editor(path: Path) -> bool:
     visual = os.environ.get("VISUAL", "").strip()
     editor = os.environ.get("EDITOR", "").strip()
     cmd_text = visual or editor
     if cmd_text:
         cmd = shlex.split(cmd_text) + [str(path)]
-        subprocess.Popen(cmd)
-        return
+        source = "$VISUAL" if visual else "$EDITOR"
+        print(f"Opening with {source}: {shlex.join(cmd)}")
+        try:
+            proc = subprocess.run(cmd)
+        except OSError as exc:
+            print(f"Could not start editor: {exc}")
+            return False
+        if proc.returncode != 0:
+            print(f"Editor exited with status {proc.returncode}.")
+            return False
+        return True
+
     opener = shutil.which("xdg-open")
     if opener:
-        subprocess.Popen([opener, str(path)])
-        return
-    print(f"No $VISUAL/$EDITOR or xdg-open found. Open: {path}")
+        print(f"Opening with xdg-open: {path}")
+        try:
+            proc = subprocess.run([opener, str(path)])
+        except OSError as exc:
+            print(f"Could not run xdg-open: {exc}")
+            return False
+        if proc.returncode != 0:
+            print(f"xdg-open exited with status {proc.returncode}.")
+            return False
+        return True
+
+    print(f"No $VISUAL/$EDITOR or xdg-open found. Open manually: {path}")
+    return False
 
 
 def append_rule(path: Path, name: str, text: str) -> None:
@@ -1082,7 +1224,11 @@ def append_rule(path: Path, name: str, text: str) -> None:
         if not existing.endswith(b"\n"):
             prefix += "\n"
         prefix += "\n"
-    block = f"{prefix}-- Generated by hypr-rule-builder: {name}\n{text}\n"
+    block = (
+        f"{prefix}-- BEGIN hypr-window-rule-builder: {name}\n"
+        f"{text}\n"
+        f"-- END hypr-window-rule-builder: {name}\n"
+    )
     with path.open("a", encoding="utf-8") as fh:
         fh.write(block)
 
@@ -1109,20 +1255,22 @@ def validate_config() -> tuple[bool, str]:
     return True, output or "Reload requested."
 
 
-def post_actions(target: Path, name: str, rule_text: str) -> None:
+def post_actions(target: Path, name: str, rule_text: str) -> str:
     while True:
         print()
         entries = [
+            ("append_open", f"Append rule, then open {target} in editor"),
+            ("append", f"Append rule without opening editor"),
             ("copy", "Copy rule to clipboard"),
-            ("append", f"Append to {target}"),
-            ("append_open", f"Append and open {target}"),
             ("open", f"Open {target} without changing it"),
-            ("done", "Done"),
+            ("rebuild", "Go back and change the rule"),
+            ("done", "Cancel without changing the config"),
         ]
-        choice = fzf_select(entries, "Action>")
-        if not choice or choice[0] == "done":
-            return
-        action = choice[0]
+        action = fzf_select(entries, "Action>")[0]
+        if action == "done":
+            return "done"
+        if action == "rebuild":
+            return "rebuild"
         if action == "copy":
             if copy_clipboard(rule_text):
                 print("Copied to clipboard.")
@@ -1131,8 +1279,14 @@ def post_actions(target: Path, name: str, rule_text: str) -> None:
             continue
         if action == "open":
             open_editor(target)
-            return
+            return "done"
+
         if action in {"append", "append_open"}:
+            print()
+            if not prompt_yes_no(f"Append this exact rule to {target}?", False):
+                print("Not appended.")
+                continue
+
             if target.exists() and rule_text in target.read_text(encoding="utf-8", errors="ignore"):
                 print("That exact rule text is already present; not appending a duplicate.")
             else:
@@ -1160,9 +1314,11 @@ def post_actions(target: Path, name: str, rule_text: str) -> None:
                             rollback_msg = (rollback.stdout + rollback.stderr).strip()
                             if rollback_msg:
                                 print(rollback_msg)
+
             if action == "append_open":
-                open_editor(target)
-            return
+                if not open_editor(target):
+                    print(f"The rule was appended, but the editor did not open. File: {target}")
+            return "done"
 
 
 def parser_selftest() -> None:
@@ -1249,30 +1405,46 @@ def main() -> int:
     print("New rules appended there will come after your existing rules and normally act as overrides.")
 
     default_name = default_rule_name(client)
-    name = prompt_value("Rule name", default_name)
-    matchers = build_match(client, active_addr)
-    effects = build_effects(client, monitors)
-    if not effects:
-        print("A rule needs at least one effect. Nothing generated.")
-        return 1
-
     use_helper = target_uses_helper(target)
-    rule_text = render_rule(name, matchers, effects, use_helper)
 
-    print()
-    print("Generated rule")
-    print("=" * min(80, terminal_width()))
-    print(rule_text)
-    print("=" * min(80, terminal_width()))
-    print(f"Put this in: {target}")
-    if use_helper:
-        print("Detected your local rule(name, match, effects) helper and generated matching syntax.")
-    else:
-        print("Generated native hl.window_rule({...}) syntax.")
+    while True:
+        name = prompt_value("Rule name", default_name)
+        matchers = build_match(client, active_addr)
+        effects = build_effects(client, monitors)
+        if not effects:
+            print("A rule needs at least one effect. Nothing generated.")
+            if prompt_yes_no("Start the rule over?", True):
+                continue
+            return 0
 
-    post_actions(target, name, rule_text)
-    return 0
+        rule_text = render_rule(name, matchers, effects, use_helper)
+
+        print()
+        print("Generated rule")
+        print("=" * min(80, terminal_width()))
+        print(rule_text)
+        print("=" * min(80, terminal_width()))
+        print(f"Target: {target}")
+        if use_helper:
+            print("Using your local rule(name, match, effects) helper syntax.")
+        else:
+            print("Using native hl.window_rule({...}) syntax.")
+
+        action = post_actions(target, name, rule_text)
+        if action == "rebuild":
+            print()
+            print("Rebuilding rule. Nothing has been written yet.")
+            continue
+        return 0
+
+
+def entrypoint() -> int:
+    try:
+        return main()
+    except (KeyboardInterrupt, UserCancelled):
+        print("\nCancelled. No further changes were made.")
+        return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(entrypoint())
