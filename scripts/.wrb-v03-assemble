@@ -30,7 +30,213 @@ __WRB_PART_3__
 # __WRB_ASSEMBLY_GUARD_3_4__
 # __WRB_ASSEMBLY_GUARD_3_5__
 # __WRB_ASSEMBLY_GUARD_3_6__
-__WRB_PART_4__
+    ("no_blur", "No blur", "disable blur"),
+    ("no_dim", "No dim", "disable dimming"),
+    ("no_shadow", "No shadow", "disable shadow"),
+    ("no_shortcuts_inhibit", "Block shortcut inhibition", "ignore app shortcut-inhibit requests"),
+]
+
+
+def choose_enum(label: str, values: list[str], default: str = "") -> str:
+    entries = [(v, v) for v in values]
+    selected = fzf_select(entries, f"{label}>")
+    return selected[0] if selected else default
+
+
+def parse_vec2_prompt(label: str, default: tuple[Any, Any] | None = None) -> str:
+    d1 = str(default[0]) if default else ""
+    d2 = str(default[1]) if default else ""
+    x = prompt_value(f"{label} X / width", d1)
+    y = prompt_value(f"{label} Y / height", d2)
+
+    def item(v: str) -> str:
+        if re.fullmatch(r"-?(?:\d+(?:\.\d*)?|\.\d+)", v):
+            return v
+        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+            return v
+        return lua_quote(v)
+
+    return f"{{ {item(x)}, {item(y)} }}"
+
+
+def _vec2_summary(value: str) -> str:
+    return value.replace("{", "").replace("}", "").strip()
+
+
+def _effect_value_summary(key: str, effects: dict[str, str], client: dict[str, Any]) -> str:
+    if key == "mode":
+        if effects.get("float") == "true":
+            return "float"
+        if effects.get("tile") == "true":
+            return "tile"
+        return "unchanged"
+    if key == "size":
+        return _vec2_summary(effects["size"]) if "size" in effects else "unchanged"
+    if key == "position":
+        if effects.get("center") == "true":
+            return "center"
+        if "move" in effects:
+            return _vec2_summary(effects["move"])
+        return "unchanged"
+    if key in effects:
+        return effects[key]
+    state = live_boolean_state(key, client)
+    if state is None:
+        return "unchanged"
+    return f"unchanged (live: {str(state).lower()})"
+
+
+def _edit_boolean_effect(effects: dict[str, str], client: dict[str, Any], key: str, label: str) -> None:
+    live = live_boolean_state(key, client)
+    live_text = "unknown" if live is None else str(live).lower()
+    current = effects.get(key, "unchanged")
+    choice = fzf_select(
+        [
+            ("unchanged", f"Leave unchanged  |  current rule: {current}; live window: {live_text}"),
+            ("true", "Set true"),
+            ("false", "Set false"),
+        ],
+        f"{label}>",
+        header="Selecting a property edits its value. Nothing is enabled just by highlighting it.",
+    )[0]
+    if choice == "unchanged":
+        effects.pop(key, None)
+    else:
+        effects[key] = choice
+
+
+def _edit_mode(effects: dict[str, str], client: dict[str, Any]) -> None:
+    current_mode = "floating" if client.get("floating") else "tiled"
+    choice = fzf_select(
+        [
+            ("unchanged", f"Leave unchanged  |  live window: {current_mode}"),
+            ("float", "Float this window"),
+            ("tile", "Tile this window"),
+        ],
+        "Mode>",
+        header="Choose one. Float and tile are mutually exclusive.",
+    )[0]
+    effects.pop("float", None)
+    effects.pop("tile", None)
+    if choice == "float":
+        effects["float"] = "true"
+    elif choice == "tile":
+        effects["tile"] = "true"
+        effects.pop("size", None)
+        effects.pop("move", None)
+        effects.pop("center", None)
+
+
+def _edit_size(effects: dict[str, str], client: dict[str, Any]) -> None:
+    size = client.get("size") or []
+    entries = [("unchanged", "Leave size unchanged")]
+    if isinstance(size, list) and len(size) >= 2:
+        entries.append(("current", f"Use live size ({size[0]} x {size[1]})"))
+    entries.append(("custom", "Set a custom size"))
+    choice = fzf_select(entries, "Size>")[0]
+    if choice == "unchanged":
+        effects.pop("size", None)
+    elif choice == "current" and len(size) >= 2:
+        effects["size"] = f"{{ {int(size[0])}, {int(size[1])} }}"
+    else:
+        default = (size[0], size[1]) if len(size) >= 2 else None
+        effects["size"] = parse_vec2_prompt("Size", default)
+
+
+def _edit_position(effects: dict[str, str], client: dict[str, Any], monitors: list[dict[str, Any]]) -> None:
+    pos = mon_local_position(client, monitors)
+    entries = [
+        ("unchanged", "Leave position unchanged"),
+        ("center", "Center the window"),
+    ]
+    if pos:
+        entries.append(("current", f"Use live position ({pos[0]}, {pos[1]} monitor-local)"))
+    entries.append(("custom", "Set a custom position"))
+    choice = fzf_select(entries, "Position>")[0]
+    effects.pop("move", None)
+    effects.pop("center", None)
+    if choice == "center":
+        effects["center"] = "true"
+    elif choice == "current" and pos:
+        effects["move"] = f"{{ {pos[0]}, {pos[1]} }}"
+    elif choice == "custom":
+        effects["move"] = parse_vec2_prompt("Position", pos)
+
+
+def _edit_workspace(effects: dict[str, str], client: dict[str, Any]) -> None:
+    ws_id, ws_name = client_workspace(client)
+    live = str(ws_name or ws_id or "")
+    choice = fzf_select(
+        [
+            ("unchanged", f"Leave workspace unchanged  |  live: {live or 'unknown'}"),
+            ("current", f"Use live workspace ({live})"),
+            ("custom", "Set a workspace"),
+        ],
+        "Workspace>",
+    )[0]
+    if choice == "unchanged":
+        effects.pop("workspace", None)
+    elif choice == "current":
+        if ws_id != "":
+            effects["workspace"] = lua_quote(str(ws_id))
+        elif ws_name:
+            effects["workspace"] = lua_quote(f"name:{ws_name}")
+    else:
+        effects["workspace"] = lua_quote(prompt_value("Workspace", live or "1"))
+
+
+def _edit_monitor(effects: dict[str, str], client: dict[str, Any], monitors: list[dict[str, Any]]) -> None:
+    mon = monitor_for_client(client, monitors)
+    live = str((mon or {}).get("name") or client.get("monitor") or "")
+    choice = fzf_select(
+        [
+            ("unchanged", f"Leave monitor unchanged  |  live: {live or 'unknown'}"),
+            ("current", f"Use live monitor ({live})"),
+            ("custom", "Set a monitor"),
+        ],
+        "Monitor>",
+    )[0]
+    if choice == "unchanged":
+        effects.pop("monitor", None)
+    elif choice == "current" and live:
+        effects["monitor"] = lua_quote(live)
+    else:
+        effects["monitor"] = lua_quote(prompt_value("Monitor", live))
+
+
+def _edit_other_effect(effects: dict[str, str], client: dict[str, Any], monitors: list[dict[str, Any]], key: str) -> None:
+    if key == "workspace":
+        _edit_workspace(effects, client)
+    elif key == "monitor":
+        _edit_monitor(effects, client, monitors)
+    elif key == "idle_inhibit":
+        value = choose_enum("Idle inhibit", ["unchanged", "none", "always", "focus", "fullscreen"], "unchanged")
+        if value == "unchanged":
+            effects.pop("idle_inhibit", None)
+        else:
+            effects["idle_inhibit"] = lua_quote(value)
+    elif key == "opacity":
+        if prompt_yes_no("Leave opacity unchanged?", "opacity" not in effects):
+            effects.pop("opacity", None)
+        else:
+            effects["opacity"] = lua_quote(prompt_value("Opacity", "1.0 0.9"))
+    elif key == "rounding":
+        if prompt_yes_no("Leave rounding unchanged?", "rounding" not in effects):
+            effects.pop("rounding", None)
+        else:
+            effects["rounding"] = prompt_value("Rounding pixels", "8")
+    elif key == "border_size":
+        if prompt_yes_no("Leave border size unchanged?", "border_size" not in effects):
+            effects.pop("border_size", None)
+        else:
+            effects["border_size"] = prompt_value("Border size", "0")
+    elif key == "tag":
+        if prompt_yes_no("Leave tags unchanged?", "tag" not in effects):
+            effects.pop("tag", None)
+        else:
+            effects["tag"] = lua_quote(prompt_value("Tag", "+custom"))
+    elif key == "suppress_event":
+        if prompt_yes_no("Do not suppress events?", "suppress_event" not in effects):
 # __WRB_ASSEMBLY_GUARD_4_0__
 # __WRB_ASSEMBLY_GUARD_4_1__
 # __WRB_ASSEMBLY_GUARD_4_2__
