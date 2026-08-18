@@ -1,4 +1,255 @@
-__WRB_PART_0__
+#!/usr/bin/env python3
+'''
+hypr-window-rule-builder
+Interactive Hyprland Lua window-rule builder.
+
+Designed for Hyprland >= 0.55 Lua configuration.
+References:
+  https://wiki.hypr.land/Configuring/Basics/Window-Rules/
+  https://wiki.hypr.land/Configuring/Advanced-and-Cool/Using-hyprctl/
+
+Runtime requirements:
+  - python >= 3.10
+  - hyprctl
+Optional:
+  - fzf      nicer selectors
+  - wl-copy  copy generated rule to clipboard
+'''
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from typing import Any, Iterable
+
+VERSION = "0.3.0"
+
+MATCH_FIELDS = (
+    "class",
+    "title",
+    "initial_class",
+    "initial_title",
+    "tag",
+    "xwayland",
+    "float",
+    "fullscreen",
+    "pin",
+    "focus",
+    "group",
+    "modal",
+    "workspace",
+    "content",
+    "xdg_tag",
+)
+
+BOOL_MATCH_FIELDS = {"xwayland", "float", "fullscreen", "pin", "focus", "group", "modal"}
+
+EFFECT_MENU = [
+    ("capture_state", "Capture current state", "float/tile, geometry, workspace, monitor, fullscreen, pin"),
+    ("float", "Float", "float = true"),
+    ("tile", "Tile", "tile = true"),
+    ("center", "Center", "center = true"),
+    ("size_current", "Current size", "size = current width/height"),
+    ("move_current", "Current position", "move = current monitor-local x/y"),
+    ("workspace_current", "Current workspace", "workspace = current workspace"),
+    ("monitor_current", "Current monitor", "monitor = current monitor name"),
+    ("fullscreen", "Fullscreen", "fullscreen = true"),
+    ("maximize", "Maximize", "maximize = true"),
+    ("pin", "Pin", "pin = true"),
+    ("pseudo", "Pseudo tile", "pseudo = true"),
+    ("persistent_size", "Remember floating size", "persistent_size = true"),
+    ("keep_aspect_ratio", "Keep aspect ratio", "keep_aspect_ratio = true"),
+    ("opaque", "Force opaque", "opaque = true"),
+    ("no_screen_share", "Hide from screen sharing", "no_screen_share = true"),
+    ("no_initial_focus", "No initial focus", "no_initial_focus = true"),
+    ("focus_on_activate_false", "Block focus-on-activate", "focus_on_activate = false"),
+    ("no_follow_mouse", "No follow mouse", "no_follow_mouse = true"),
+    ("no_focus", "Never focus", "no_focus = true"),
+    ("no_anim", "No animation", "no_anim = true"),
+    ("no_blur", "No blur", "no_blur = true"),
+    ("no_dim", "No dim", "no_dim = true"),
+    ("no_shadow", "No shadow", "no_shadow = true"),
+    ("no_shortcuts_inhibit", "Block shortcut inhibition", "no_shortcuts_inhibit = true"),
+    ("idle_inhibit", "Idle inhibit...", "none / always / focus / fullscreen"),
+    ("opacity", "Opacity...", 'e.g. "1.0 0.9"'),
+    ("rounding", "Rounding...", "pixel count"),
+    ("border_size", "Border size...", "pixel count"),
+    ("tag", "Apply tag...", '"+name", "-name", or "name"'),
+    ("workspace_custom", "Workspace...", 'e.g. "3", "special:name silent"'),
+    ("monitor_custom", "Monitor...", 'e.g. "eDP-1"'),
+    ("size_custom", "Size...", "two Lua values/expressions"),
+    ("move_custom", "Position...", "two Lua values/expressions"),
+    ("suppress_event", "Suppress event...", "maximize, activate, ..."),
+    ("content", "Content type...", "none / photo / video / game"),
+    ("custom", "Custom effect...", "arbitrary effect = Lua value"),
+]
+
+
+@dataclass
+class LuaRule:
+    name: str
+    match: dict[str, Any]
+    effects: dict[str, Any]
+    file: Path
+    line: int
+    raw: str
+    unknown_match: set[str] = field(default_factory=set)
+
+
+class UserCancelled(Exception):
+    """Raised when the user intentionally cancels an interactive step."""
+
+
+def eprint(*args: Any, **kwargs: Any) -> None:
+    print(*args, file=sys.stderr, **kwargs)
+
+
+def run_json(*args: str) -> Any:
+    proc = subprocess.run(
+        ["hyprctl", "-j", *args],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"hyprctl {' '.join(args)} failed")
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid JSON from hyprctl {' '.join(args)}: {exc}") from exc
+
+
+def clear() -> None:
+    if sys.stdout.isatty():
+        print("\033[2J\033[H", end="")
+
+
+def terminal_width(default: int = 100) -> int:
+    try:
+        return shutil.get_terminal_size().columns
+    except OSError:
+        return default
+
+
+def truncate(value: Any, width: int) -> str:
+    s = str(value or "").replace("\n", " ")
+    if len(s) <= width:
+        return s
+    return s[: max(1, width - 1)] + "…"
+
+
+def fzf_select(
+    entries: list[tuple[str, str]],
+    prompt: str,
+    *,
+    multi: bool = False,
+    header: str | None = None,
+) -> list[str]:
+    if not entries:
+        return []
+
+    fzf = shutil.which("fzf")
+    if fzf and sys.stdin.isatty() and sys.stdout.isatty():
+        rows = [f"{key}\t{display}" for key, display in entries]
+        full_header = "Esc cancels" if not header else f"{header}  |  Esc cancels"
+        cmd = [
+            fzf,
+            "--ansi",
+            "--delimiter=\t",
+            "--with-nth=2..",
+            "--layout=reverse",
+            "--border",
+            "--height=90%",
+            f"--prompt={prompt} ",
+            f"--header={full_header}",
+        ]
+        if multi:
+            cmd.extend(["--multi", "--bind=space:toggle"])
+        proc = subprocess.run(
+            cmd,
+            input="\n".join(rows) + "\n",
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+        if proc.returncode != 0:
+            raise UserCancelled
+        return [line.split("\t", 1)[0] for line in proc.stdout.splitlines()]
+
+    print()
+    print(prompt)
+    for i, (_, display) in enumerate(entries, 1):
+        print(f"  {i:>2}. {display}")
+    if multi:
+        raw = input("Choose numbers separated by spaces (blank = none, q = cancel): ").strip()
+        if raw.lower() in {"q", "quit", "cancel"}:
+            raise UserCancelled
+        if not raw:
+            return []
+        out: list[str] = []
+        for token in re.split(r"[\s,]+", raw):
+            if token.isdigit() and 1 <= int(token) <= len(entries):
+                out.append(entries[int(token) - 1][0])
+        return out
+    raw = input("Choose number (q = cancel): ").strip()
+    if raw.lower() in {"q", "quit", "cancel"} or not raw:
+        raise UserCancelled
+    if not raw.isdigit() or not (1 <= int(raw) <= len(entries)):
+        raise UserCancelled
+    return [entries[int(raw) - 1][0]]
+
+
+def prompt_value(label: str, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
+    value = input(f"{label}{suffix}: ").strip()
+    return value if value else default
+
+
+def prompt_yes_no(label: str, default: bool = False) -> bool:
+    hint = "Y/n" if default else "y/N"
+    raw = input(f"{label} [{hint}]: ").strip().lower()
+    if not raw:
+        return default
+    return raw in {"y", "yes"}
+
+
+def lua_quote(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def exact_regex(value: str) -> str:
+    # Escape RE2 metacharacters without turning ordinary spaces or hyphens into
+    # noisy backslash escapes. This keeps generated title matchers readable.
+    escaped = re.sub(r"([\\.^$|?*+(){}\[\]])", r"\\\1", value)
+    return "^" + escaped + "$"
+
+
+def bool_lua(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def client_workspace(client: dict[str, Any]) -> tuple[Any, str]:
+    ws = client.get("workspace") or {}
+    return ws.get("id", ""), str(ws.get("name", ""))
+
+
+def client_tags(client: dict[str, Any]) -> list[str]:
+    tags = client.get("tags") or []
+    if isinstance(tags, str):
+        return [tags]
+    return [str(t) for t in tags]
+
+
+def monitor_for_client(client: dict[str, Any], monitors: list[dict[str, Any]]) -> dict[str, Any] | None:
+    cid = client.get("monitor")
+    for mon in monitors:
 # __WRB_ASSEMBLY_GUARD_0_0__
 # __WRB_ASSEMBLY_GUARD_0_1__
 # __WRB_ASSEMBLY_GUARD_0_2__
