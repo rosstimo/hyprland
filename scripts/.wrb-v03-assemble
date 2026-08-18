@@ -54,4 +54,164 @@ __WRB_PART_6__
 # __WRB_ASSEMBLY_GUARD_6_4__
 # __WRB_ASSEMBLY_GUARD_6_5__
 # __WRB_ASSEMBLY_GUARD_6_6__
-__WRB_PART_7__
+                            )
+                            print("Restored previous file and requested another reload.")
+                            rollback_msg = (rollback.stdout + rollback.stderr).strip()
+                            if rollback_msg:
+                                print(rollback_msg)
+
+            if action == "append_open":
+                if not open_editor(target):
+                    print(f"The rule was appended, but the editor did not open. File: {target}")
+            return "done"
+
+
+def parser_selftest() -> None:
+    sample = r'''
+local function rule(name, match, effects)
+  effects.name = name
+  effects.match = match
+  hl.window_rule(effects)
+end
+rule("foo", { class = "^kitty$", float = false }, {
+  float = true,
+  size = { 800, 600 },
+})
+hl.window_rule({
+  name = "bar",
+  match = { title = "Hello.*" },
+  opacity = "0.9 0.8",
+})
+'''
+    rules = extract_rules_from_text(sample, Path("sample.lua"))
+    assert len(rules) == 2, rules
+    assert rules[0].name == "foo"
+    assert rules[0].match["class"] == "^kitty$"
+    assert rules[0].match["float"] is False
+    assert rules[0].effects["float"] is True
+    assert rules[1].name == "bar"
+    assert rules[1].match["title"] == "Hello.*"
+    print("Parser self-test passed.")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Interactive Hyprland Lua window-rule builder")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    parser.add_argument(
+        "--config-dir",
+        help="Hyprland config directory (default: $XDG_CONFIG_HOME/hypr or ~/.config/hypr)",
+    )
+    parser.add_argument("--target", help="Rule file to append/open (default: windows.lua if present)")
+    parser.add_argument("--self-test", action="store_true", help="Run parser self-test and exit")
+    args = parser.parse_args()
+
+    if args.self_test:
+        parser_selftest()
+        return 0
+
+    if not shutil.which("hyprctl"):
+        eprint("hyprctl was not found in PATH.")
+        return 2
+
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    config_dir = Path(args.config_dir).expanduser() if args.config_dir else xdg / "hypr"
+    target = find_target(config_dir, args.target)
+
+    try:
+        clients = run_json("clients")
+        active = run_json("activewindow")
+        monitors = run_json("monitors")
+    except RuntimeError as exc:
+        eprint(exc)
+        return 2
+
+    if not isinstance(clients, list) or not clients:
+        eprint("Hyprland reports no open windows.")
+        return 1
+    if not isinstance(active, dict):
+        active = {}
+    if not isinstance(monitors, list):
+        monitors = []
+
+    client = choose_client(clients, active)
+    if not client:
+        return 0
+
+    active_addr = str(active.get("address") or "")
+    clear()
+    print_client(client, monitors, active_addr)
+
+    rules = scan_lua_rules(config_dir)
+    matches = matching_rules(rules, client, active_addr)
+    print_matching_rules(matches, config_dir)
+
+    print()
+    print(f"Rule target: {target}")
+    print("New rules appended there will come after your existing rules and normally act as overrides.")
+
+    default_name = default_rule_name(client)
+    use_helper = target_uses_helper(target)
+
+    while True:
+        name = prompt_value("Rule name", default_name)
+        matchers = build_match(client, active_addr)
+        effects, effect_client, effect_monitors = build_effects(client, monitors)
+        if not effects:
+            print("A rule needs at least one effect. Nothing generated.")
+            if prompt_yes_no("Start the rule over?", True):
+                continue
+            return 0
+
+        while True:
+            warn_about_static_title_match(matchers, effects, client)
+            rule_text = render_rule(name, matchers, effects, use_helper)
+
+            print()
+            print("Generated rule")
+            print("=" * min(80, terminal_width()))
+            print(rule_text)
+            print("=" * min(80, terminal_width()))
+            print(f"Target: {target}")
+            if use_helper:
+                print("Using your local rule(name, match, effects) helper syntax.")
+            else:
+                print("Using native hl.window_rule({...}) syntax.")
+
+            action = post_actions(target, name, rule_text)
+            if action == "edit":
+                edit_choice = fzf_select(
+                    [
+                        ("behavior", "Edit behavior / captured properties"),
+                        ("match", "Edit how the window is identified"),
+                        ("name", "Rename the rule"),
+                        ("back", "Back to generated rule"),
+                    ],
+                    "Review>",
+                    header="Nothing has been written yet.",
+                )[0]
+                if edit_choice == "behavior":
+                    effects = edit_effects_draft(effect_client, effect_monitors, effects)
+                    if not effects:
+                        print("The rule now has no effects.")
+                elif edit_choice == "match":
+                    matchers = build_match(client, active_addr)
+                elif edit_choice == "name":
+                    name = prompt_value("Rule name", name)
+                continue
+            if action == "rebuild":
+                print()
+                print("Starting the rule over. Nothing has been written yet.")
+                break
+            return 0
+
+
+def entrypoint() -> int:
+    try:
+        return main()
+    except (KeyboardInterrupt, UserCancelled):
+        print("\nCancelled. No further changes were made.")
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(entrypoint())
