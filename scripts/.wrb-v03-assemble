@@ -46,7 +46,237 @@ __WRB_PART_5__
 # __WRB_ASSEMBLY_GUARD_5_4__
 # __WRB_ASSEMBLY_GUARD_5_5__
 # __WRB_ASSEMBLY_GUARD_5_6__
-__WRB_PART_6__
+def warn_about_static_title_match(
+    matchers: dict[str, str],
+    effects: dict[str, str],
+    client: dict[str, Any],
+) -> None:
+    static_effects = {
+        "float", "tile", "fullscreen", "maximize", "move", "size", "center", "pseudo",
+        "monitor", "workspace", "no_initial_focus", "pin", "persistent_size",
+        "keep_aspect_ratio", "suppress_event", "content",
+    }
+    if not (static_effects & effects.keys()):
+        return
+    if "title" not in matchers:
+        return
+    current_title = str(client.get("title") or "")
+    initial_title = str(client.get("initialTitle") or "")
+    if not current_title or current_title == initial_title:
+        return
+    print()
+    print("WARNING: current title differs from initial title.")
+    print("This rule contains startup/static effects such as float/size/position.")
+    print("Hyprland evaluates those when the window is created, so a matcher based only on")
+    print("a title that appears later may not apply those effects. Review the match fields if needed.")
+
+def sanitize_rule_name(value: str) -> str:
+    value = value.lower()
+    value = re.sub(r"[^a-z0-9]+", "-", value).strip("-")
+    return value or "window-rule"
+
+
+def default_rule_name(client: dict[str, Any]) -> str:
+    cls = str(client.get("class") or client.get("initialClass") or "window")
+    return sanitize_rule_name(cls)
+
+
+def render_match_value(field: str, value: str) -> str:
+    if field in BOOL_MATCH_FIELDS:
+        return value.lower()
+    if field == "workspace" and re.fullmatch(r"-?\d+", value):
+        return value
+    return lua_quote(value)
+
+
+def render_rule(
+    name: str,
+    matchers: dict[str, str],
+    effects: dict[str, str],
+    use_helper: bool,
+) -> str:
+    match_lines = [f"  {key} = {render_match_value(key, value)}," for key, value in matchers.items()]
+
+    if use_helper:
+        lines = [
+            f"rule({lua_quote(name)}, {{",
+            *match_lines,
+            "}, {",
+        ]
+        for key, value in effects.items():
+            lines.append(f"  {key} = {value},")
+        lines.append("})")
+        return "\n".join(lines)
+
+    lines = [
+        "hl.window_rule({",
+        f"  name = {lua_quote(name)},",
+        "  match = {",
+        *["  " + line for line in match_lines],
+        "  },",
+    ]
+    for key, value in effects.items():
+        lines.append(f"  {key} = {value},")
+    lines.append("})")
+    return "\n".join(lines)
+
+
+def target_uses_helper(path: Path) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return bool(re.search(r"\blocal\s+function\s+rule\s*\(", text))
+
+
+def find_target(config_dir: Path, requested: str | None) -> Path:
+    if requested:
+        return Path(requested).expanduser()
+    candidate = config_dir / "windows.lua"
+    if candidate.exists():
+        return candidate
+    return config_dir / "hyprland.lua"
+
+
+def copy_clipboard(text: str) -> bool:
+    tool = shutil.which("wl-copy")
+    if not tool:
+        return False
+    proc = subprocess.run([tool], input=text, text=True)
+    return proc.returncode == 0
+
+
+def open_editor(path: Path) -> bool:
+    visual = os.environ.get("VISUAL", "").strip()
+    editor = os.environ.get("EDITOR", "").strip()
+    cmd_text = visual or editor
+    if cmd_text:
+        cmd = shlex.split(cmd_text) + [str(path)]
+        source = "$VISUAL" if visual else "$EDITOR"
+        print(f"Opening with {source}: {shlex.join(cmd)}")
+        try:
+            proc = subprocess.run(cmd)
+        except OSError as exc:
+            print(f"Could not start editor: {exc}")
+            return False
+        if proc.returncode != 0:
+            print(f"Editor exited with status {proc.returncode}.")
+            return False
+        return True
+
+    opener = shutil.which("xdg-open")
+    if opener:
+        print(f"Opening with xdg-open: {path}")
+        try:
+            proc = subprocess.run([opener, str(path)])
+        except OSError as exc:
+            print(f"Could not run xdg-open: {exc}")
+            return False
+        if proc.returncode != 0:
+            print(f"xdg-open exited with status {proc.returncode}.")
+            return False
+        return True
+
+    print(f"No $VISUAL/$EDITOR or xdg-open found. Open manually: {path}")
+    return False
+
+
+def append_rule(path: Path, name: str, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    prefix = ""
+    if path.exists() and path.stat().st_size:
+        existing = path.read_bytes()
+        if not existing.endswith(b"\n"):
+            prefix += "\n"
+        prefix += "\n"
+    block = (
+        f"{prefix}-- BEGIN hypr-window-rule-builder: {name}\n"
+        f"{text}\n"
+        f"-- END hypr-window-rule-builder: {name}\n"
+    )
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(block)
+
+
+def validate_config() -> tuple[bool, str]:
+    proc = subprocess.run(
+        ["hyprctl", "reload"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    output = (proc.stdout + proc.stderr).strip()
+    if proc.returncode != 0:
+        return False, output
+    err = subprocess.run(
+        ["hyprctl", "configerrors"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    msg = (err.stdout + err.stderr).strip()
+    if err.returncode == 0 and msg and msg.lower() not in {"ok", "no errors"}:
+        return False, msg
+    return True, output or "Reload requested."
+
+
+def post_actions(target: Path, name: str, rule_text: str) -> str:
+    while True:
+        print()
+        entries = [
+            ("append_open", f"Append rule, then open {target} in editor"),
+            ("append", f"Append rule without opening editor"),
+            ("copy", "Copy rule to clipboard"),
+            ("open", f"Open {target} without changing it"),
+            ("edit", "Review/change this rule before writing"),
+            ("rebuild", "Start this rule over"),
+            ("done", "Cancel without changing the config"),
+        ]
+        action = fzf_select(entries, "Action>")[0]
+        if action == "done":
+            return "done"
+        if action == "edit":
+            return "edit"
+        if action == "rebuild":
+            return "rebuild"
+        if action == "copy":
+            if copy_clipboard(rule_text):
+                print("Copied to clipboard.")
+            else:
+                print("wl-copy is not installed; rule was not copied.")
+            continue
+        if action == "open":
+            open_editor(target)
+            return "done"
+
+        if action in {"append", "append_open"}:
+            print()
+            if not prompt_yes_no(f"Append this exact rule to {target}?", False):
+                print("Not appended.")
+                continue
+
+            if target.exists() and rule_text in target.read_text(encoding="utf-8", errors="ignore"):
+                print("That exact rule text is already present; not appending a duplicate.")
+            else:
+                existed_before = target.exists()
+                previous = target.read_bytes() if existed_before else b""
+                append_rule(target, name, rule_text)
+                print(f"Appended to {target}")
+                if prompt_yes_no("Reload Hyprland now?", True):
+                    ok, message = validate_config()
+                    print(message)
+                    if not ok:
+                        print("Hyprland reported a config problem.")
+                        if prompt_yes_no("Restore the file to its pre-append state?", True):
+                            if existed_before:
+                                target.write_bytes(previous)
+                            else:
+                                target.unlink(missing_ok=True)
+                            rollback = subprocess.run(
+                                ["hyprctl", "reload"],
+                                text=True,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
 # __WRB_ASSEMBLY_GUARD_6_0__
 # __WRB_ASSEMBLY_GUARD_6_1__
 # __WRB_ASSEMBLY_GUARD_6_2__
