@@ -30,7 +30,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 MATCH_FIELDS = (
     "class",
@@ -44,12 +44,13 @@ MATCH_FIELDS = (
     "pin",
     "focus",
     "group",
+    "modal",
     "workspace",
     "content",
     "xdg_tag",
 )
 
-BOOL_MATCH_FIELDS = {"xwayland", "float", "fullscreen", "pin", "focus", "group"}
+BOOL_MATCH_FIELDS = {"xwayland", "float", "fullscreen", "pin", "focus", "group", "modal"}
 
 EFFECT_MENU = [
     ("capture_state", "Capture current state", "float/tile, geometry, workspace, monitor, fullscreen, pin"),
@@ -224,7 +225,10 @@ def lua_quote(value: str) -> str:
 
 
 def exact_regex(value: str) -> str:
-    return "^" + re.escape(value) + "$"
+    # Escape RE2 metacharacters without turning ordinary spaces or hyphens into
+    # noisy backslash escapes. This keeps generated title matchers readable.
+    escaped = re.sub(r"([\\.^$|?*+(){}\[\]])", r"\\\1", value)
+    return "^" + escaped + "$"
 
 
 def bool_lua(value: bool) -> str:
@@ -246,6 +250,13 @@ def client_tags(client: dict[str, Any]) -> list[str]:
 def monitor_for_client(client: dict[str, Any], monitors: list[dict[str, Any]]) -> dict[str, Any] | None:
     cid = client.get("monitor")
     for mon in monitors:
+# __WRB_ASSEMBLY_GUARD_0_0__
+# __WRB_ASSEMBLY_GUARD_0_1__
+# __WRB_ASSEMBLY_GUARD_0_2__
+# __WRB_ASSEMBLY_GUARD_0_3__
+# __WRB_ASSEMBLY_GUARD_0_4__
+# __WRB_ASSEMBLY_GUARD_0_5__
+# __WRB_ASSEMBLY_GUARD_0_6__
         if mon.get("id") == cid:
             return mon
     for mon in monitors:
@@ -258,7 +269,13 @@ def window_display(client: dict[str, Any], active_addr: str) -> str:
     ws_id, ws_name = client_workspace(client)
     mark = "*" if client.get("address") == active_addr else " "
     mode = "F" if client.get("floating") else "T"
-    if int(client.get("fullscreen") or 0):
+    try:
+        fs_state = int(client.get("fullscreen") or 0)
+    except (TypeError, ValueError):
+        fs_state = 0
+    if fs_state in {1, 3}:
+        mode += "M"
+    if fs_state in {2, 3}:
         mode += "S"
     if client.get("pinned"):
         mode += "P"
@@ -283,7 +300,7 @@ def choose_client(clients: list[dict[str, Any]], active: dict[str, Any]) -> dict
     keys = fzf_select(
         entries,
         "Window>",
-        header="* active   F floating   T tiled   S fullscreen   P pinned",
+        header="* active   F floating   T tiled   M maximized   S fullscreen   P pinned",
     )
     if not keys:
         return None
@@ -312,6 +329,8 @@ def print_client(client: dict[str, Any], monitors: list[dict[str, Any]], active_
     print(f"Fullscreen    : {client.get('fullscreen', 0)}")
     print(f"Pinned        : {bool(client.get('pinned'))}")
     print(f"XWayland      : {bool(client.get('xwayland'))}")
+    if "modal" in client:
+        print(f"Modal         : {bool(client.get('modal'))}")
     print(f"Focused       : {str(client.get('address')) == active_addr}")
     print(f"Tags          : {tags}")
     if client.get("xdgTag"):
@@ -497,6 +516,13 @@ def _parse_lua_table(table: str) -> dict[str, Any] | list[Any]:
         keyed["__positional__"] = positional
         return keyed
     if keyed:
+# __WRB_ASSEMBLY_GUARD_1_0__
+# __WRB_ASSEMBLY_GUARD_1_1__
+# __WRB_ASSEMBLY_GUARD_1_2__
+# __WRB_ASSEMBLY_GUARD_1_3__
+# __WRB_ASSEMBLY_GUARD_1_4__
+# __WRB_ASSEMBLY_GUARD_1_5__
+# __WRB_ASSEMBLY_GUARD_1_6__
         return keyed
     return positional
 
@@ -715,6 +741,13 @@ def print_matching_rules(matches: list[tuple[str, LuaRule, list[str]]], config_d
 
 # ---------- Rule builder ----------
 
+# __WRB_ASSEMBLY_GUARD_2_0__
+# __WRB_ASSEMBLY_GUARD_2_1__
+# __WRB_ASSEMBLY_GUARD_2_2__
+# __WRB_ASSEMBLY_GUARD_2_3__
+# __WRB_ASSEMBLY_GUARD_2_4__
+# __WRB_ASSEMBLY_GUARD_2_5__
+# __WRB_ASSEMBLY_GUARD_2_6__
 def matcher_default(field: str, client: dict[str, Any], active_addr: str) -> str:
     if field == "class":
         return exact_regex(str(client.get("class") or ""))
@@ -741,6 +774,8 @@ def matcher_default(field: str, client: dict[str, Any], active_addr: str) -> str
         return bool_lua(str(client.get("address")) == active_addr)
     if field == "group":
         return bool_lua(bool(client.get("grouped") or []))
+    if field == "modal":
+        return bool_lua(bool(client.get("modal")))
     if field == "workspace":
         ws_id, ws_name = client_workspace(client)
         return str(ws_id if ws_id != "" else f"name:{ws_name}")
@@ -804,15 +839,16 @@ def build_match(client: dict[str, Any], active_addr: str) -> dict[str, str]:
             "app",
             f"All {truncate(cls, 36)} windows  |  match class only",
         ))
-    if cls and title:
-        profiles.append((
-            "window",
-            f"This window/dialog only  |  class + current title: {truncate(title, 42)}",
-        ))
     if initial_cls and initial_title:
         profiles.append((
             "initial",
             f"Launch identity  |  initial class + initial title: {truncate(initial_title, 38)}",
+        ))
+    if cls and title:
+        changed = "  (title changed since launch)" if title != initial_title else ""
+        profiles.append((
+            "window",
+            f"Current identity  |  class + current title: {truncate(title, 42)}{changed}",
         ))
     profiles.append(("custom", "Custom match fields  |  advanced"))
 
@@ -821,7 +857,7 @@ def build_match(client: dict[str, Any], active_addr: str) -> dict[str, str]:
     selected = fzf_select(
         profiles,
         "Identify>",
-        header="For dialogs/popups, class + title is usually the safer choice.",
+        header="Launch identity is safer for startup behavior. Current title is more precise but may change after creation.",
     )[0]
 
     if selected == "app":
@@ -876,34 +912,65 @@ def mon_local_position(client: dict[str, Any], monitors: list[dict[str, Any]]) -
         return None
 
 
-def current_state_effects(client: dict[str, Any], monitors: list[dict[str, Any]]) -> dict[str, str]:
-    effects: dict[str, str] = {}
-    if client.get("floating"):
-        effects["float"] = "true"
-        pos = mon_local_position(client, monitors)
-        size = client.get("size")
-        if pos:
-            effects["move"] = f"{{ {pos[0]}, {pos[1]} }}"
-        if isinstance(size, list) and len(size) >= 2:
-            effects["size"] = f"{{ {int(size[0])}, {int(size[1])} }}"
-    else:
-        effects["tile"] = "true"
+def client_fullscreen_flags(client: dict[str, Any]) -> tuple[bool, bool]:
+    """Return (fullscreen, maximized) from Hyprland's internal fullscreen state."""
+    try:
+        state = int(client.get("fullscreen") or 0)
+    except (TypeError, ValueError):
+        state = 0
+    return state in {2, 3}, state in {1, 3}
 
-    ws_id, ws_name = client_workspace(client)
-    if ws_id != "":
-        effects["workspace"] = lua_quote(str(ws_id))
-    elif ws_name:
-        effects["workspace"] = lua_quote(f"name:{ws_name}")
 
-    mon = monitor_for_client(client, monitors)
-    if mon and mon.get("name"):
-        effects["monitor"] = lua_quote(str(mon["name"]))
+def live_boolean_state(key: str, client: dict[str, Any]) -> bool | None:
+    fullscreen, maximized = client_fullscreen_flags(client)
+    mapping: dict[str, bool | None] = {
+        "fullscreen": fullscreen,
+        "maximize": maximized,
+        "pin": bool(client.get("pinned")),
+        "pseudo": bool(client.get("pseudo")) if "pseudo" in client else None,
+        "focus_on_activate": None,
+        "persistent_size": None,
+        "keep_aspect_ratio": None,
+        "opaque": None,
+        "no_screen_share": None,
+        "no_initial_focus": None,
+        "no_follow_mouse": None,
+        "no_focus": None,
+        "no_anim": None,
+        "no_blur": None,
+        "no_dim": None,
+        "no_shadow": None,
+        "no_shortcuts_inhibit": None,
+    }
+    return mapping.get(key)
 
-    if int(client.get("fullscreen") or 0):
-        effects["fullscreen"] = "true"
-    if client.get("pinned"):
-        effects["pin"] = "true"
-    return effects
+
+BOOLEAN_EFFECTS: list[tuple[str, str, str]] = [
+    ("fullscreen", "Fullscreen", "open fullscreen"),
+    ("maximize", "Maximize", "open maximized"),
+    ("pin", "Pin", "show on all workspaces; floating only"),
+    ("pseudo", "Pseudo tile", "use pseudotiling"),
+    ("persistent_size", "Remember floating size", "allow size persistence"),
+    ("keep_aspect_ratio", "Keep aspect ratio", "preserve aspect ratio while resizing"),
+    ("opaque", "Force opaque", "disable transparency"),
+    ("no_screen_share", "Hide from screen sharing", "block capture of this window"),
+    ("no_initial_focus", "No initial focus", "do not focus when opened"),
+    ("focus_on_activate", "Focus on activate", "allow app activation to focus the window"),
+    ("no_follow_mouse", "No follow mouse", "ignore follow-mouse focus"),
+    ("no_focus", "Never focus", "prevent focus"),
+    ("no_anim", "No animation", "disable window animations"),
+# __WRB_ASSEMBLY_GUARD_3_0__
+# __WRB_ASSEMBLY_GUARD_3_1__
+# __WRB_ASSEMBLY_GUARD_3_2__
+# __WRB_ASSEMBLY_GUARD_3_3__
+# __WRB_ASSEMBLY_GUARD_3_4__
+# __WRB_ASSEMBLY_GUARD_3_5__
+# __WRB_ASSEMBLY_GUARD_3_6__
+    ("no_blur", "No blur", "disable blur"),
+    ("no_dim", "No dim", "disable dimming"),
+    ("no_shadow", "No shadow", "disable shadow"),
+    ("no_shortcuts_inhibit", "Block shortcut inhibition", "ignore app shortcut-inhibit requests"),
+]
 
 
 def choose_enum(label: str, values: list[str], default: str = "") -> str:
@@ -928,182 +995,408 @@ def parse_vec2_prompt(label: str, default: tuple[Any, Any] | None = None) -> str
     return f"{{ {item(x)}, {item(y)} }}"
 
 
-def _resolve_effect_conflicts(effects: dict[str, str]) -> None:
-    if effects.get("float") == "true" and effects.get("tile") == "true":
-        choice = fzf_select(
-            [("float", "Keep Float and remove Tile"), ("tile", "Keep Tile and remove Float")],
-            "Conflict>",
-            header="A window rule cannot sensibly request both float and tile.",
-        )[0]
-        effects.pop("tile" if choice == "float" else "float", None)
-
-    if "center" in effects and "move" in effects:
-        choice = fzf_select(
-            [("center", "Keep Center and remove Position"), ("move", "Keep Position and remove Center")],
-            "Conflict>",
-            header="Center and an explicit move position fight each other.",
-        )[0]
-        effects.pop("move" if choice == "center" else "center", None)
+def _vec2_summary(value: str) -> str:
+    return value.replace("{", "").replace("}", "").strip()
 
 
-def build_effects(client: dict[str, Any], monitors: list[dict[str, Any]]) -> dict[str, str]:
-    size = client.get("size") or []
-    pos = mon_local_position(client, monitors)
-    ws_id, ws_name = client_workspace(client)
-    mon = monitor_for_client(client, monitors)
-    current_mode = "floating" if client.get("floating") else "tiled"
+def _effect_value_summary(key: str, effects: dict[str, str], client: dict[str, Any]) -> str:
+    if key == "mode":
+        if effects.get("float") == "true":
+            return "float"
+        if effects.get("tile") == "true":
+            return "tile"
+        return "unchanged"
+    if key == "size":
+        return _vec2_summary(effects["size"]) if "size" in effects else "unchanged"
+    if key == "position":
+        if effects.get("center") == "true":
+            return "center"
+        if "move" in effects:
+            return _vec2_summary(effects["move"])
+        return "unchanged"
+    if key in effects:
+        return effects[key]
+    state = live_boolean_state(key, client)
+    if state is None:
+        return "unchanged"
+    return f"unchanged (live: {str(state).lower()})"
 
-    effects: dict[str, str] = {}
 
-    print()
-    print("Window behavior")
-    mode = fzf_select(
+def _edit_boolean_effect(effects: dict[str, str], client: dict[str, Any], key: str, label: str) -> None:
+    live = live_boolean_state(key, client)
+    live_text = "unknown" if live is None else str(live).lower()
+    current = effects.get(key, "unchanged")
+    choice = fzf_select(
         [
-            ("unchanged", "Leave float/tile mode unchanged"),
+            ("unchanged", f"Leave unchanged  |  current rule: {current}; live window: {live_text}"),
+            ("true", "Set true"),
+            ("false", "Set false"),
+        ],
+        f"{label}>",
+        header="Selecting a property edits its value. Nothing is enabled just by highlighting it.",
+    )[0]
+    if choice == "unchanged":
+        effects.pop(key, None)
+    else:
+        effects[key] = choice
+
+
+def _edit_mode(effects: dict[str, str], client: dict[str, Any]) -> None:
+    current_mode = "floating" if client.get("floating") else "tiled"
+    choice = fzf_select(
+        [
+            ("unchanged", f"Leave unchanged  |  live window: {current_mode}"),
             ("float", "Float this window"),
             ("tile", "Tile this window"),
-            ("current", f"Remember current mode ({current_mode})"),
         ],
         "Mode>",
-        header="Choose exactly one window mode. This prevents float/tile conflicts.",
+        header="Choose one. Float and tile are mutually exclusive.",
     )[0]
-
-    effective_mode = current_mode if mode == "current" else mode
-    if effective_mode == "float":
+    effects.pop("float", None)
+    effects.pop("tile", None)
+    if choice == "float":
         effects["float"] = "true"
-    elif effective_mode == "tile":
+    elif choice == "tile":
         effects["tile"] = "true"
+        effects.pop("size", None)
+        effects.pop("move", None)
+        effects.pop("center", None)
 
-    # Geometry is meaningful for a floating window. If mode is unchanged, offer it
-    # only when the selected window is already floating.
-    geometry_allowed = effective_mode == "float" or (mode == "unchanged" and client.get("floating"))
-    if geometry_allowed:
-        if isinstance(size, list) and len(size) >= 2:
-            size_choice = fzf_select(
-                [
-                    ("unchanged", "Leave size unchanged"),
-                    ("current", f"Use current size ({size[0]} x {size[1]})"),
-                    ("custom", "Set a custom size"),
-                ],
-                "Size>",
-                header="Size is independent of float/tile mode.",
-            )[0]
-            if size_choice == "current":
-                effects["size"] = f"{{ {int(size[0])}, {int(size[1])} }}"
-            elif size_choice == "custom":
-                effects["size"] = parse_vec2_prompt("Size", (size[0], size[1]))
 
-        position_entries = [("unchanged", "Leave position unchanged"), ("center", "Center the window")]
-        if pos:
-            position_entries.append(("current", f"Use current position ({pos[0]}, {pos[1]} monitor-local)"))
-        position_entries.append(("custom", "Set a custom position"))
-        position_choice = fzf_select(
-            position_entries,
-            "Position>",
-            header="Choose one position behavior.",
-        )[0]
-        if position_choice == "center":
-            effects["center"] = "true"
-        elif position_choice == "current" and pos:
-            effects["move"] = f"{{ {pos[0]}, {pos[1]} }}"
-        elif position_choice == "custom":
-            effects["move"] = parse_vec2_prompt("Position", pos)
+def _edit_size(effects: dict[str, str], client: dict[str, Any]) -> None:
+    size = client.get("size") or []
+    entries = [("unchanged", "Leave size unchanged")]
+    if isinstance(size, list) and len(size) >= 2:
+        entries.append(("current", f"Use live size ({size[0]} x {size[1]})"))
+    entries.append(("custom", "Set a custom size"))
+    choice = fzf_select(entries, "Size>")[0]
+    if choice == "unchanged":
+        effects.pop("size", None)
+    elif choice == "current" and len(size) >= 2:
+        effects["size"] = f"{{ {int(size[0])}, {int(size[1])} }}"
+    else:
+        default = (size[0], size[1]) if len(size) >= 2 else None
+        effects["size"] = parse_vec2_prompt("Size", default)
 
-    skip_keys = {
-        "capture_state", "float", "tile", "center",
-        "size_current", "move_current", "size_custom", "move_custom",
-    }
-    advanced_entries: list[tuple[str, str]] = []
-    for key, label, help_text in EFFECT_MENU:
-        if key in skip_keys:
-            continue
-        if key == "workspace_current":
-            help_text = str(ws_name or ws_id)
-        elif key == "monitor_current":
-            help_text = str((mon or {}).get("name") or client.get("monitor") or "")
-        advanced_entries.append((key, f"{label:<26} {help_text}"))
 
-    print()
-    print("Optional effects")
-    selected = fzf_select(
-        advanced_entries,
-        "More>",
-        multi=True,
-        header="Optional. Space toggles items. Enter with nothing selected continues.",
-    )
+def _edit_position(effects: dict[str, str], client: dict[str, Any], monitors: list[dict[str, Any]]) -> None:
+    pos = mon_local_position(client, monitors)
+    entries = [
+        ("unchanged", "Leave position unchanged"),
+        ("center", "Center the window"),
+    ]
+    if pos:
+        entries.append(("current", f"Use live position ({pos[0]}, {pos[1]} monitor-local)"))
+    entries.append(("custom", "Set a custom position"))
+    choice = fzf_select(entries, "Position>")[0]
+    effects.pop("move", None)
+    effects.pop("center", None)
+    if choice == "center":
+        effects["center"] = "true"
+    elif choice == "current" and pos:
+        effects["move"] = f"{{ {pos[0]}, {pos[1]} }}"
+    elif choice == "custom":
+        effects["move"] = parse_vec2_prompt("Position", pos)
 
-    if "workspace_current" in selected and "workspace_custom" in selected:
-        selected.remove("workspace_current")
-        print("Both current and custom workspace were selected; custom workspace wins.")
-    if "monitor_current" in selected and "monitor_custom" in selected:
-        selected.remove("monitor_current")
-        print("Both current and custom monitor were selected; custom monitor wins.")
 
-    for key in selected:
-        if key in {
-            "fullscreen",
-            "maximize",
-            "pin",
-            "pseudo",
-            "persistent_size",
-            "keep_aspect_ratio",
-            "opaque",
-            "no_screen_share",
-            "no_initial_focus",
-            "no_follow_mouse",
-            "no_focus",
-            "no_anim",
-            "no_blur",
-            "no_dim",
-            "no_shadow",
-            "no_shortcuts_inhibit",
-        }:
-            effects[key] = "true"
-        elif key == "focus_on_activate_false":
-            effects["focus_on_activate"] = "false"
-        elif key == "workspace_current":
-            if ws_id != "":
-                effects["workspace"] = lua_quote(str(ws_id))
-            elif ws_name:
-                effects["workspace"] = lua_quote(f"name:{ws_name}")
-        elif key == "monitor_current" and mon and mon.get("name"):
-            effects["monitor"] = lua_quote(str(mon["name"]))
-        elif key == "idle_inhibit":
-            value = choose_enum("Idle inhibit", ["none", "always", "focus", "fullscreen"], "fullscreen")
+def _edit_workspace(effects: dict[str, str], client: dict[str, Any]) -> None:
+    ws_id, ws_name = client_workspace(client)
+    live = str(ws_name or ws_id or "")
+    choice = fzf_select(
+        [
+            ("unchanged", f"Leave workspace unchanged  |  live: {live or 'unknown'}"),
+            ("current", f"Use live workspace ({live})"),
+            ("custom", "Set a workspace"),
+        ],
+        "Workspace>",
+    )[0]
+    if choice == "unchanged":
+        effects.pop("workspace", None)
+    elif choice == "current":
+        if ws_id != "":
+            effects["workspace"] = lua_quote(str(ws_id))
+        elif ws_name:
+            effects["workspace"] = lua_quote(f"name:{ws_name}")
+    else:
+        effects["workspace"] = lua_quote(prompt_value("Workspace", live or "1"))
+
+
+def _edit_monitor(effects: dict[str, str], client: dict[str, Any], monitors: list[dict[str, Any]]) -> None:
+    mon = monitor_for_client(client, monitors)
+    live = str((mon or {}).get("name") or client.get("monitor") or "")
+    choice = fzf_select(
+        [
+            ("unchanged", f"Leave monitor unchanged  |  live: {live or 'unknown'}"),
+            ("current", f"Use live monitor ({live})"),
+            ("custom", "Set a monitor"),
+        ],
+        "Monitor>",
+    )[0]
+    if choice == "unchanged":
+        effects.pop("monitor", None)
+    elif choice == "current" and live:
+        effects["monitor"] = lua_quote(live)
+    else:
+        effects["monitor"] = lua_quote(prompt_value("Monitor", live))
+
+
+def _edit_other_effect(effects: dict[str, str], client: dict[str, Any], monitors: list[dict[str, Any]], key: str) -> None:
+    if key == "workspace":
+        _edit_workspace(effects, client)
+    elif key == "monitor":
+        _edit_monitor(effects, client, monitors)
+    elif key == "idle_inhibit":
+        value = choose_enum("Idle inhibit", ["unchanged", "none", "always", "focus", "fullscreen"], "unchanged")
+        if value == "unchanged":
+            effects.pop("idle_inhibit", None)
+        else:
             effects["idle_inhibit"] = lua_quote(value)
-        elif key == "opacity":
+    elif key == "opacity":
+        if prompt_yes_no("Leave opacity unchanged?", "opacity" not in effects):
+            effects.pop("opacity", None)
+        else:
             effects["opacity"] = lua_quote(prompt_value("Opacity", "1.0 0.9"))
-        elif key == "rounding":
+    elif key == "rounding":
+        if prompt_yes_no("Leave rounding unchanged?", "rounding" not in effects):
+            effects.pop("rounding", None)
+        else:
             effects["rounding"] = prompt_value("Rounding pixels", "8")
-        elif key == "border_size":
+    elif key == "border_size":
+        if prompt_yes_no("Leave border size unchanged?", "border_size" not in effects):
+            effects.pop("border_size", None)
+        else:
             effects["border_size"] = prompt_value("Border size", "0")
-        elif key == "tag":
+    elif key == "tag":
+        if prompt_yes_no("Leave tags unchanged?", "tag" not in effects):
+            effects.pop("tag", None)
+        else:
             effects["tag"] = lua_quote(prompt_value("Tag", "+custom"))
-        elif key == "workspace_custom":
-            effects["workspace"] = lua_quote(prompt_value("Workspace", str(ws_id or ws_name or "1")))
-        elif key == "monitor_custom":
-            effects["monitor"] = lua_quote(prompt_value("Monitor", str((mon or {}).get("name") or "")))
-        elif key == "suppress_event":
+    elif key == "suppress_event":
+        if prompt_yes_no("Do not suppress events?", "suppress_event" not in effects):
+# __WRB_ASSEMBLY_GUARD_4_0__
+# __WRB_ASSEMBLY_GUARD_4_1__
+# __WRB_ASSEMBLY_GUARD_4_2__
+# __WRB_ASSEMBLY_GUARD_4_3__
+# __WRB_ASSEMBLY_GUARD_4_4__
+# __WRB_ASSEMBLY_GUARD_4_5__
+# __WRB_ASSEMBLY_GUARD_4_6__
+            effects.pop("suppress_event", None)
+        else:
             effects["suppress_event"] = lua_quote(prompt_value("Suppressed events", "maximize"))
-        elif key == "content":
-            value = choose_enum("Content", ["none", "photo", "video", "game"], "none")
+    elif key == "content":
+        value = choose_enum("Content", ["unchanged", "none", "photo", "video", "game"], "unchanged")
+        if value == "unchanged":
+            effects.pop("content", None)
+        else:
             effects["content"] = lua_quote(value)
-        elif key == "custom":
-            while True:
-                effect_name = prompt_value("Effect name")
-                if not effect_name:
-                    break
-                lua_value = prompt_value("Lua value", "true")
-                effects[effect_name] = lua_value
-                if not prompt_yes_no("Add another custom effect?", False):
-                    break
+    elif key == "custom":
+        effect_name = prompt_value("Effect name")
+        if effect_name:
+            lua_value = prompt_value("Lua value", effects.get(effect_name, "true"))
+            effects[effect_name] = lua_value
 
-    _resolve_effect_conflicts(effects)
 
-    if not effects:
-        print("No behavior changes were selected.")
+def _property_entries(effects: dict[str, str], client: dict[str, Any]) -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = [
+        ("done", "Done editing properties"),
+        ("mode", f"Window mode                 {_effect_value_summary('mode', effects, client)}"),
+        ("size", f"Size                        {_effect_value_summary('size', effects, client)}"),
+        ("position", f"Position                    {_effect_value_summary('position', effects, client)}"),
+    ]
+    for key, label, help_text in BOOLEAN_EFFECTS:
+        value = _effect_value_summary(key, effects, client)
+        entries.append((f"bool:{key}", f"{label:<27} {value:<28} {help_text}"))
+    ws = effects.get("workspace", "unchanged")
+    mon = effects.get("monitor", "unchanged")
+    entries.extend([
+        ("other:workspace", f"{'Workspace':<27} {ws}"),
+        ("other:monitor", f"{'Monitor':<27} {mon}"),
+        ("other:idle_inhibit", f"{'Idle inhibit':<27} {effects.get('idle_inhibit', 'unchanged')}"),
+        ("other:opacity", f"{'Opacity':<27} {effects.get('opacity', 'unchanged')}"),
+        ("other:rounding", f"{'Rounding':<27} {effects.get('rounding', 'unchanged')}"),
+        ("other:border_size", f"{'Border size':<27} {effects.get('border_size', 'unchanged')}"),
+        ("other:tag", f"{'Tag':<27} {effects.get('tag', 'unchanged')}"),
+        ("other:suppress_event", f"{'Suppress event':<27} {effects.get('suppress_event', 'unchanged')}"),
+        ("other:content", f"{'Content type':<27} {effects.get('content', 'unchanged')}"),
+        ("other:custom", "Custom effect..."),
+    ])
+    return entries
+
+
+def edit_effects_draft(
+    client: dict[str, Any],
+    monitors: list[dict[str, Any]],
+    effects: dict[str, str] | None = None,
+) -> dict[str, str]:
+    effects = dict(effects or {})
+    while True:
+        print()
+        print("Rule properties")
+        selected = fzf_select(
+            _property_entries(effects, client),
+            "Property>",
+            header="Select a property to edit it. Values shown as 'unchanged' will not appear in the rule.",
+        )[0]
+        if selected == "done":
+            break
+        if selected == "mode":
+            _edit_mode(effects, client)
+        elif selected == "size":
+            _edit_size(effects, client)
+        elif selected == "position":
+            _edit_position(effects, client, monitors)
+        elif selected.startswith("bool:"):
+            key = selected.split(":", 1)[1]
+            label = next(label for item_key, label, _ in BOOLEAN_EFFECTS if item_key == key)
+            _edit_boolean_effect(effects, client, key, label)
+        elif selected.startswith("other:"):
+            _edit_other_effect(effects, client, monitors, selected.split(":", 1)[1])
+
+    # Defensive conflict cleanup.
+    if effects.get("float") == "true":
+        effects.pop("tile", None)
+    if effects.get("tile") == "true":
+        effects.pop("float", None)
+        effects.pop("size", None)
+        effects.pop("move", None)
+        effects.pop("center", None)
+    if effects.get("center") == "true":
+        effects.pop("move", None)
     return effects
 
+
+def capture_window_state(client: dict[str, Any], monitors: list[dict[str, Any]]) -> dict[str, str]:
+    """Capture the selected live window as an editable rule-property draft."""
+    effects: dict[str, str] = {}
+    if client.get("floating"):
+        effects["float"] = "true"
+        size = client.get("size") or []
+        pos = mon_local_position(client, monitors)
+        if isinstance(size, list) and len(size) >= 2:
+            effects["size"] = f"{{ {int(size[0])}, {int(size[1])} }}"
+        if pos:
+            effects["move"] = f"{{ {pos[0]}, {pos[1]} }}"
+    else:
+        effects["tile"] = "true"
+
+    fullscreen, maximized = client_fullscreen_flags(client)
+    effects["fullscreen"] = bool_lua(fullscreen)
+    effects["maximize"] = bool_lua(maximized)
+    effects["pin"] = bool_lua(bool(client.get("pinned")))
+    if "pseudo" in client:
+        effects["pseudo"] = bool_lua(bool(client.get("pseudo")))
+
+    ws_id, ws_name = client_workspace(client)
+    if ws_id != "":
+        effects["workspace"] = lua_quote(str(ws_id))
+    elif ws_name:
+        effects["workspace"] = lua_quote(f"name:{ws_name}")
+
+    mon = monitor_for_client(client, monitors)
+    if mon and mon.get("name"):
+        effects["monitor"] = lua_quote(str(mon["name"]))
+    return effects
+
+
+def refresh_selected_window(address: str) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
+    clients = run_json("clients")
+    monitors = run_json("monitors")
+    active = run_json("activewindow")
+    if not isinstance(clients, list):
+        raise RuntimeError("Hyprland did not return a client list while capturing the window.")
+    refreshed = next((c for c in clients if str(c.get("address") or "") == address), None)
+    if not refreshed:
+        raise RuntimeError("The selected window closed before its state could be captured.")
+    if not isinstance(monitors, list):
+        monitors = []
+    active_addr = str(active.get("address") or "") if isinstance(active, dict) else ""
+    return refreshed, monitors, active_addr
+
+
+def manually_adjust_and_capture(
+    client: dict[str, Any],
+    monitors: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, str]]:
+    print()
+    print("Manual window capture")
+    print("=" * min(80, terminal_width()))
+    print("Leave this terminal open. Adjust the selected window however you want:")
+    print("float/tile it, move it, resize it, maximize/fullscreen it, or pin/unpin it.")
+    print("When it looks right, return to this terminal and press Enter.")
+    input("Press Enter to capture the adjusted window...")
+
+    address = str(client.get("address") or "")
+    refreshed, refreshed_monitors, active_addr = refresh_selected_window(address)
+    print()
+    print("Captured live state")
+    print_client(refreshed, refreshed_monitors, active_addr)
+    effects = capture_window_state(refreshed, refreshed_monitors)
+    print()
+    print("The capture is only a draft. You can change or remove any captured property next.")
+    return refreshed, refreshed_monitors, effects
+
+
+def build_effects(
+    client: dict[str, Any],
+    monitors: list[dict[str, Any]],
+) -> tuple[dict[str, str], dict[str, Any], list[dict[str, Any]]]:
+    print()
+    print("Window behavior")
+    workflow = fzf_select(
+        [
+            ("adjust", "Adjust the live window manually, then capture it"),
+            ("current", "Capture the window exactly as it is now"),
+            ("manual", "Build the rule properties manually"),
+        ],
+        "Behavior>",
+        header="Captured state becomes an editable draft before any rule is generated.",
+    )[0]
+
+    draft: dict[str, str] = {}
+    working_client = client
+    working_monitors = monitors
+    if workflow == "adjust":
+        working_client, working_monitors, draft = manually_adjust_and_capture(client, monitors)
+    elif workflow == "current":
+        draft = capture_window_state(client, monitors)
+        print("Captured current state as a draft. Review it in the property editor.")
+
+    effects = edit_effects_draft(working_client, working_monitors, draft)
+    if not effects:
+        print("No behavior changes are currently in the rule.")
+    return effects, working_client, working_monitors
+
+
+# __WRB_ASSEMBLY_GUARD_5_0__
+# __WRB_ASSEMBLY_GUARD_5_1__
+# __WRB_ASSEMBLY_GUARD_5_2__
+# __WRB_ASSEMBLY_GUARD_5_3__
+# __WRB_ASSEMBLY_GUARD_5_4__
+# __WRB_ASSEMBLY_GUARD_5_5__
+# __WRB_ASSEMBLY_GUARD_5_6__
+def warn_about_static_title_match(
+    matchers: dict[str, str],
+    effects: dict[str, str],
+    client: dict[str, Any],
+) -> None:
+    static_effects = {
+        "float", "tile", "fullscreen", "maximize", "move", "size", "center", "pseudo",
+        "monitor", "workspace", "no_initial_focus", "pin", "persistent_size",
+        "keep_aspect_ratio", "suppress_event", "content",
+    }
+    if not (static_effects & effects.keys()):
+        return
+    if "title" not in matchers:
+        return
+    current_title = str(client.get("title") or "")
+    initial_title = str(client.get("initialTitle") or "")
+    if not current_title or current_title == initial_title:
+        return
+    print()
+    print("WARNING: current title differs from initial title.")
+    print("This rule contains startup/static effects such as float/size/position.")
+    print("Hyprland evaluates those when the window is created, so a matcher based only on")
+    print("a title that appears later may not apply those effects. Review the match fields if needed.")
 
 def sanitize_rule_name(value: str) -> str:
     value = value.lower()
@@ -1263,12 +1556,15 @@ def post_actions(target: Path, name: str, rule_text: str) -> str:
             ("append", f"Append rule without opening editor"),
             ("copy", "Copy rule to clipboard"),
             ("open", f"Open {target} without changing it"),
-            ("rebuild", "Go back and change the rule"),
+            ("edit", "Review/change this rule before writing"),
+            ("rebuild", "Start this rule over"),
             ("done", "Cancel without changing the config"),
         ]
         action = fzf_select(entries, "Action>")[0]
         if action == "done":
             return "done"
+        if action == "edit":
+            return "edit"
         if action == "rebuild":
             return "rebuild"
         if action == "copy":
@@ -1309,6 +1605,13 @@ def post_actions(target: Path, name: str, rule_text: str) -> str:
                                 text=True,
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE,
+# __WRB_ASSEMBLY_GUARD_6_0__
+# __WRB_ASSEMBLY_GUARD_6_1__
+# __WRB_ASSEMBLY_GUARD_6_2__
+# __WRB_ASSEMBLY_GUARD_6_3__
+# __WRB_ASSEMBLY_GUARD_6_4__
+# __WRB_ASSEMBLY_GUARD_6_5__
+# __WRB_ASSEMBLY_GUARD_6_6__
                             )
                             print("Restored previous file and requested another reload.")
                             rollback_msg = (rollback.stdout + rollback.stderr).strip()
@@ -1410,32 +1713,54 @@ def main() -> int:
     while True:
         name = prompt_value("Rule name", default_name)
         matchers = build_match(client, active_addr)
-        effects = build_effects(client, monitors)
+        effects, effect_client, effect_monitors = build_effects(client, monitors)
         if not effects:
             print("A rule needs at least one effect. Nothing generated.")
             if prompt_yes_no("Start the rule over?", True):
                 continue
             return 0
 
-        rule_text = render_rule(name, matchers, effects, use_helper)
+        while True:
+            warn_about_static_title_match(matchers, effects, client)
+            rule_text = render_rule(name, matchers, effects, use_helper)
 
-        print()
-        print("Generated rule")
-        print("=" * min(80, terminal_width()))
-        print(rule_text)
-        print("=" * min(80, terminal_width()))
-        print(f"Target: {target}")
-        if use_helper:
-            print("Using your local rule(name, match, effects) helper syntax.")
-        else:
-            print("Using native hl.window_rule({...}) syntax.")
-
-        action = post_actions(target, name, rule_text)
-        if action == "rebuild":
             print()
-            print("Rebuilding rule. Nothing has been written yet.")
-            continue
-        return 0
+            print("Generated rule")
+            print("=" * min(80, terminal_width()))
+            print(rule_text)
+            print("=" * min(80, terminal_width()))
+            print(f"Target: {target}")
+            if use_helper:
+                print("Using your local rule(name, match, effects) helper syntax.")
+            else:
+                print("Using native hl.window_rule({...}) syntax.")
+
+            action = post_actions(target, name, rule_text)
+            if action == "edit":
+                edit_choice = fzf_select(
+                    [
+                        ("behavior", "Edit behavior / captured properties"),
+                        ("match", "Edit how the window is identified"),
+                        ("name", "Rename the rule"),
+                        ("back", "Back to generated rule"),
+                    ],
+                    "Review>",
+                    header="Nothing has been written yet.",
+                )[0]
+                if edit_choice == "behavior":
+                    effects = edit_effects_draft(effect_client, effect_monitors, effects)
+                    if not effects:
+                        print("The rule now has no effects.")
+                elif edit_choice == "match":
+                    matchers = build_match(client, active_addr)
+                elif edit_choice == "name":
+                    name = prompt_value("Rule name", name)
+                continue
+            if action == "rebuild":
+                print()
+                print("Starting the rule over. Nothing has been written yet.")
+                break
+            return 0
 
 
 def entrypoint() -> int:
